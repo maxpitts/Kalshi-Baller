@@ -1,0 +1,856 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YOLO ENGINE — $100 → $10,000</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0f;
+      --bg2: #12121a;
+      --bg3: #1a1a28;
+      --border: #2a2a3a;
+      --text: #e0e0e8;
+      --text-dim: #6a6a7a;
+      --green: #00ff88;
+      --green-dim: #00aa5c;
+      --red: #ff3366;
+      --red-dim: #aa2244;
+      --cyan: #00ccff;
+      --yellow: #ffcc00;
+      --purple: #aa66ff;
+    }
+
+    body {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ─── Header ─────────────────────────────────── */
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-icon { font-size: 28px; }
+
+    .logo h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      background: linear-gradient(135deg, var(--cyan), var(--purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .logo .sub { font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
+
+    .header-controls { display: flex; gap: 8px; }
+
+    .btn {
+      padding: 8px 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg3);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      letter-spacing: 0.5px;
+    }
+
+    .btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .btn.active { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
+    .btn.danger { border-color: var(--red-dim); color: var(--red); }
+    .btn.danger:hover { background: var(--red); color: white; }
+
+    .state-badge {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+
+    .state-IDLE { background: var(--bg3); color: var(--text-dim); }
+    .state-SCANNING { background: #001a33; color: var(--cyan); border: 1px solid var(--cyan); }
+    .state-BETTING { background: #1a0033; color: var(--purple); border: 1px solid var(--purple); animation: pulse 1s infinite; }
+    .state-WAITING { background: #1a1a00; color: var(--yellow); border: 1px solid var(--yellow); }
+    .state-TARGET_HIT { background: #001a0d; color: var(--green); border: 1px solid var(--green); animation: glow 1.5s infinite; }
+    .state-SELF_DESTRUCTING { background: #330011; color: var(--red); border: 1px solid var(--red); animation: shake 0.3s infinite; }
+    .state-DEAD { background: #1a0000; color: #660022; border: 1px solid #330011; }
+    .state-ERROR { background: #331100; color: #ff6600; border: 1px solid #ff6600; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes glow { 0%, 100% { box-shadow: 0 0 5px var(--green); } 50% { box-shadow: 0 0 20px var(--green); } }
+    @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-2px); } 75% { transform: translateX(2px); } }
+
+    /* ─── Main Grid ───────────────────────────────── */
+
+    .main {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-rows: auto auto 1fr;
+      gap: 1px;
+      background: var(--border);
+      min-height: calc(100vh - 60px);
+    }
+
+    .panel {
+      background: var(--bg);
+      padding: 20px;
+    }
+
+    .panel-title {
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+      margin-bottom: 16px;
+      text-transform: uppercase;
+    }
+
+    /* ─── Countdown ───────────────────────────────── */
+
+    .countdown-panel {
+      grid-column: 1 / 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+    }
+
+    .countdown {
+      font-size: 52px;
+      font-weight: 700;
+      letter-spacing: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .countdown.critical { color: var(--red); animation: pulse 0.5s infinite; }
+    .countdown.warning { color: var(--yellow); }
+    .countdown.normal { color: var(--cyan); }
+
+    .countdown-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 2px;
+      margin-top: 8px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 4px;
+      background: var(--bg3);
+      border-radius: 2px;
+      margin-top: 16px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 1s ease;
+    }
+
+    /* ─── Bankroll ────────────────────────────────── */
+
+    .bankroll-panel {
+      grid-column: 2 / 3;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .bankroll-amount {
+      font-size: 48px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .bankroll-amount.profit { color: var(--green); }
+    .bankroll-amount.loss { color: var(--red); }
+
+    .bankroll-change {
+      font-size: 14px;
+      margin-top: 4px;
+    }
+
+    .target-info {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 12px;
+    }
+
+    .target-progress {
+      width: 200px;
+      height: 6px;
+      background: var(--bg3);
+      border-radius: 3px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+
+    .target-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--cyan), var(--green));
+      border-radius: 3px;
+      transition: width 0.5s ease;
+    }
+
+    /* ─── Stats ───────────────────────────────────── */
+
+    .stats-panel {
+      grid-column: 3 / 4;
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+
+    .stat-label { color: var(--text-dim); }
+    .stat-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    /* ─── P&L Chart ──────────────────────────────── */
+
+    .chart-panel {
+      grid-column: 1 / 3;
+      grid-row: 2 / 3;
+      min-height: 200px;
+    }
+
+    .chart-container {
+      width: 100%;
+      height: 180px;
+      position: relative;
+    }
+
+    .chart-canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ─── Active Bet ─────────────────────────────── */
+
+    .active-bet-panel {
+      grid-column: 3 / 4;
+      grid-row: 2 / 3;
+    }
+
+    .bet-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .bet-card.active {
+      border-color: var(--cyan);
+      box-shadow: 0 0 12px rgba(0, 204, 255, 0.1);
+    }
+
+    .bet-ticker {
+      font-size: 11px;
+      color: var(--cyan);
+      letter-spacing: 1px;
+    }
+
+    .bet-title {
+      font-size: 13px;
+      margin: 4px 0;
+      color: var(--text);
+    }
+
+    .bet-details {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 11px;
+    }
+
+    .bet-detail-label { color: var(--text-dim); }
+    .bet-detail-value { text-align: right; font-weight: 600; }
+
+    /* ─── Event Log ──────────────────────────────── */
+
+    .log-panel {
+      grid-column: 1 / 4;
+      grid-row: 3 / 4;
+      max-height: 300px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .log-entries {
+      flex: 1;
+      overflow-y: auto;
+      font-size: 12px;
+      line-height: 1.8;
+    }
+
+    .log-entry {
+      padding: 2px 0;
+      display: flex;
+      gap: 12px;
+      border-bottom: 1px solid rgba(42, 42, 58, 0.3);
+    }
+
+    .log-time { color: var(--text-dim); min-width: 80px; font-size: 11px; }
+    .log-type { min-width: 100px; font-weight: 600; font-size: 11px; }
+    .log-msg { color: var(--text); flex: 1; }
+
+    .log-type.START, .log-type.RUNNING { color: var(--green); }
+    .log-type.BET, .log-type.ORDER { color: var(--purple); }
+    .log-type.SCAN, .log-type.STRATEGY { color: var(--cyan); }
+    .log-type.ERROR, .log-type.ORDER_ERROR { color: var(--red); }
+    .log-type.SIM_WIN { color: var(--green); }
+    .log-type.SIM_LOSS { color: var(--red); }
+    .log-type.DESTRUCT, .log-type.NUKE { color: var(--red); }
+
+    /* ─── Self Destruct Overlay ──────────────────── */
+
+    .destruct-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.9);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+    }
+
+    .destruct-overlay.active { display: flex; }
+
+    .destruct-skull {
+      font-size: 80px;
+      animation: shake 0.2s infinite;
+    }
+
+    .destruct-text {
+      font-size: 32px;
+      color: var(--red);
+      margin-top: 20px;
+      letter-spacing: 4px;
+      animation: pulse 0.5s infinite;
+    }
+
+    .destruct-reason {
+      color: var(--text-dim);
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
+    /* ─── Target Hit Overlay ─────────────────────── */
+
+    .target-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+      flex-direction: column;
+    }
+
+    .target-overlay.active { display: flex; }
+
+    .target-emoji { font-size: 100px; animation: glow 1s infinite; }
+    .target-text {
+      font-size: 40px;
+      color: var(--green);
+      margin-top: 20px;
+      letter-spacing: 4px;
+    }
+    .target-amount {
+      font-size: 60px;
+      color: var(--green);
+      font-weight: 700;
+      margin-top: 12px;
+    }
+
+    /* ─── Responsive ─────────────────────────────── */
+
+    @media (max-width: 900px) {
+      .main {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+      }
+      .countdown-panel, .bankroll-panel, .stats-panel,
+      .chart-panel, .active-bet-panel, .log-panel {
+        grid-column: 1 / -1;
+        grid-row: auto;
+      }
+      .countdown { font-size: 36px; }
+      .bankroll-amount { font-size: 32px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">
+      <span class="logo-icon">🎰</span>
+      <div>
+        <h1>YOLO ENGINE</h1>
+        <div class="sub">$100 → $10,000 OR BUST</div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <span id="stateBadge" class="state-badge state-IDLE">IDLE</span>
+      <span id="envBadge" class="state-badge" style="background: var(--bg3); color: var(--yellow);">DEMO</span>
+    </div>
+    <div class="header-controls">
+      <button class="btn active" onclick="sendAction('start')">▶ START</button>
+      <button class="btn" onclick="sendAction('pause')">⏸ PAUSE</button>
+      <button class="btn" onclick="sendAction('resume')">▶ RESUME</button>
+      <button class="btn danger" onclick="sendAction('stop')">■ STOP</button>
+    </div>
+  </div>
+
+  <!-- Main Grid -->
+  <div class="main">
+
+    <!-- Countdown Timer -->
+    <div class="panel countdown-panel">
+      <div class="panel-title">⏱ TIME REMAINING</div>
+      <div id="countdown" class="countdown normal">48:00:00</div>
+      <div class="countdown-label">UNTIL SELF-DESTRUCT</div>
+      <div class="progress-bar">
+        <div id="timeProgress" class="progress-fill" style="width: 0%; background: var(--cyan);"></div>
+      </div>
+    </div>
+
+    <!-- Bankroll -->
+    <div class="panel bankroll-panel">
+      <div class="panel-title">💰 BANKROLL</div>
+      <div id="bankroll" class="bankroll-amount profit">$100.00</div>
+      <div id="bankrollChange" class="bankroll-change" style="color: var(--text-dim);">+$0.00 (0%)</div>
+      <div class="target-info">Target: <span id="targetAmount">$10,000.00</span></div>
+      <div class="target-progress">
+        <div id="targetProgress" class="target-progress-fill" style="width: 1%;"></div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="panel stats-panel">
+      <div class="panel-title">📊 STATS</div>
+      <div class="stat-row">
+        <span class="stat-label">Strategy</span>
+        <span id="strategyMode" class="stat-value" style="color: var(--cyan);">edge_hunter</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Total Bets</span>
+        <span id="totalBets" class="stat-value">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Win Rate</span>
+        <span id="winRate" class="stat-value">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Wins / Losses</span>
+        <span id="winLoss" class="stat-value"><span style="color:var(--green)">0</span> / <span style="color:var(--red)">0</span></span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Peak Balance</span>
+        <span id="peakBalance" class="stat-value" style="color: var(--green);">$100.00</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Total Wagered</span>
+        <span id="totalWagered" class="stat-value">$0.00</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Positions</span>
+        <span id="posCount" class="stat-value">0</span>
+      </div>
+    </div>
+
+    <!-- P&L Chart -->
+    <div class="panel chart-panel">
+      <div class="panel-title">📈 P&L HISTORY</div>
+      <div class="chart-container">
+        <canvas id="plChart" class="chart-canvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Active Bet -->
+    <div class="panel active-bet-panel">
+      <div class="panel-title">🎯 CURRENT POSITION</div>
+      <div id="activeBetArea">
+        <div class="bet-card" style="text-align: center; color: var(--text-dim); padding: 30px;">
+          Waiting for first bet...
+        </div>
+      </div>
+    </div>
+
+    <!-- Event Log -->
+    <div class="panel log-panel">
+      <div class="panel-title">📋 EVENT LOG</div>
+      <div id="logEntries" class="log-entries"></div>
+    </div>
+  </div>
+
+  <!-- Self-Destruct Overlay -->
+  <div id="destructOverlay" class="destruct-overlay">
+    <div class="destruct-skull">💀</div>
+    <div class="destruct-text">SELF-DESTRUCT</div>
+    <div id="destructReason" class="destruct-reason">Time expired</div>
+    <div id="destructFinal" style="color: var(--text-dim); margin-top: 20px; font-size: 18px;"></div>
+  </div>
+
+  <!-- Target Hit Overlay -->
+  <div id="targetOverlay" class="target-overlay">
+    <div class="target-emoji">🎉</div>
+    <div class="target-text">TARGET HIT</div>
+    <div id="finalAmount" class="target-amount">$10,000.00</div>
+    <div style="color: var(--text-dim); margin-top: 12px;">The madlad actually did it.</div>
+  </div>
+
+  <script>
+    // ─── State ─────────────────────────────────────
+    let ws = null;
+    let status = {};
+    let plHistory = [100]; // Starting at $100
+    const startBalance = 100;
+
+    // ─── WebSocket ─────────────────────────────────
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}`);
+
+      ws.onopen = () => console.log('[WS] Connected');
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+      };
+
+      ws.onclose = () => {
+        console.log('[WS] Disconnected — reconnecting in 3s');
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = (e) => console.error('[WS] Error:', e);
+    }
+
+    function sendAction(action) {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ action }));
+      } else {
+        fetch(`/api/${action}`, { method: 'POST' });
+      }
+    }
+
+    // ─── Message Handler ───────────────────────────
+    function handleMessage(msg) {
+      switch (msg.type) {
+        case 'status':
+          updateStatus(msg.data);
+          break;
+        case 'log':
+          addLogEntry(msg.data);
+          break;
+        case 'bet_signal':
+          updateActiveBet(msg.data.bet);
+          break;
+        case 'bet_result':
+          handleBetResult(msg.data);
+          break;
+        case 'self_destruct_initiated':
+          showDestructOverlay(msg.data);
+          break;
+        case 'self_destruct_complete':
+          updateDestructFinal(msg.data);
+          break;
+        case 'target_hit':
+          showTargetOverlay(msg.data);
+          break;
+        case 'order_placed':
+          addLogEntry({ type: 'ORDER', message: `Order ${msg.data.orderId} placed`, timestamp: Date.now() });
+          break;
+        case 'error':
+          addLogEntry({ type: 'ERROR', message: msg.data.message || 'Unknown error', timestamp: Date.now() });
+          break;
+      }
+    }
+
+    // ─── UI Updates ────────────────────────────────
+    function updateStatus(data) {
+      status = data;
+
+      // State badge
+      const badge = document.getElementById('stateBadge');
+      badge.textContent = data.state;
+      badge.className = `state-badge state-${data.state}`;
+
+      // Env badge
+      document.getElementById('envBadge').textContent = data.dryRun ? 'DRY RUN' : 'LIVE';
+
+      // Countdown
+      const cdEl = document.getElementById('countdown');
+      cdEl.textContent = data.timeRemainingFormatted || '48:00:00';
+      const hoursLeft = data.countdown ? data.countdown.hours : 48;
+      cdEl.className = `countdown ${hoursLeft < 4 ? 'critical' : hoursLeft < 12 ? 'warning' : 'normal'}`;
+
+      // Time progress bar
+      const maxMs = 48 * 60 * 60 * 1000;
+      const elapsed = data.elapsed || 0;
+      const pct = Math.min((elapsed / maxMs) * 100, 100);
+      const timeBar = document.getElementById('timeProgress');
+      timeBar.style.width = pct + '%';
+      timeBar.style.background = pct > 90 ? 'var(--red)' : pct > 75 ? 'var(--yellow)' : 'var(--cyan)';
+
+      // Bankroll
+      const bankrollDollars = parseFloat(data.bankrollDollars || '100');
+      const bEl = document.getElementById('bankroll');
+      bEl.textContent = `$${bankrollDollars.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+      bEl.className = `bankroll-amount ${bankrollDollars >= startBalance ? 'profit' : 'loss'}`;
+
+      // Change
+      const change = bankrollDollars - startBalance;
+      const changePct = ((change / startBalance) * 100).toFixed(1);
+      const changeEl = document.getElementById('bankrollChange');
+      changeEl.textContent = `${change >= 0 ? '+' : ''}$${change.toFixed(2)} (${changePct}%)`;
+      changeEl.style.color = change >= 0 ? 'var(--green)' : 'var(--red)';
+
+      // Target progress
+      const progress = data.progress || 0;
+      document.getElementById('targetProgress').style.width = Math.max(progress, 0.5) + '%';
+
+      // Stats
+      const stats = data.stats || {};
+      document.getElementById('strategyMode').textContent = data.strategy || 'edge_hunter';
+      document.getElementById('totalBets').textContent = stats.totalBets || 0;
+      document.getElementById('winRate').textContent = stats.totalBets > 0
+        ? (stats.winRate * 100).toFixed(1) + '%'
+        : '—';
+      document.getElementById('winLoss').innerHTML = `<span style="color:var(--green)">${stats.wins || 0}</span> / <span style="color:var(--red)">${stats.losses || 0}</span>`;
+      document.getElementById('peakBalance').textContent = `$${data.peakBankrollDollars || '100.00'}`;
+      document.getElementById('totalWagered').textContent = `$${((stats.totalWagered || 0) / 100).toFixed(2)}`;
+      document.getElementById('posCount').textContent = data.positionCount || 0;
+
+      // Track P&L
+      plHistory.push(bankrollDollars);
+      if (plHistory.length > 200) plHistory.shift();
+      drawChart();
+
+      // Populate log if we have entries and log is empty
+      if (data.eventLog && data.eventLog.length > 0) {
+        const logEl = document.getElementById('logEntries');
+        if (logEl.children.length === 0) {
+          data.eventLog.forEach(addLogEntry);
+        }
+      }
+    }
+
+    function handleBetResult(data) {
+      const isWin = data.outcome === 'win';
+      addLogEntry({
+        type: isWin ? 'SIM_WIN' : 'SIM_LOSS',
+        message: `${data.ticker} | ${isWin ? 'WIN' : 'LOSS'} | ${isWin ? '+' : '-'}$${(Math.abs(data.profit) / 100).toFixed(2)}`,
+        timestamp: data.placedAt,
+      });
+    }
+
+    function updateActiveBet(bet) {
+      if (!bet) return;
+
+      document.getElementById('activeBetArea').innerHTML = `
+        <div class="bet-card active">
+          <div class="bet-ticker">${bet.ticker}</div>
+          <div class="bet-title">${bet.title || bet.ticker}</div>
+          <div class="bet-details">
+            <span class="bet-detail-label">Side</span>
+            <span class="bet-detail-value" style="color: ${bet.side === 'yes' ? 'var(--green)' : 'var(--red)'}">${bet.side.toUpperCase()}</span>
+            <span class="bet-detail-label">Contracts</span>
+            <span class="bet-detail-value">${bet.numContracts}</span>
+            <span class="bet-detail-label">Price</span>
+            <span class="bet-detail-value">${bet.pricePerContract}¢</span>
+            <span class="bet-detail-label">Cost</span>
+            <span class="bet-detail-value">$${(bet.totalCost / 100).toFixed(2)}</span>
+            <span class="bet-detail-label">Potential</span>
+            <span class="bet-detail-value" style="color: var(--green)">$${(bet.potentialPayout / 100).toFixed(2)}</span>
+            <span class="bet-detail-label">Multiple</span>
+            <span class="bet-detail-value" style="color: var(--yellow)">${bet.potentialMultiple}x</span>
+          </div>
+          <div style="margin-top: 10px; font-size: 10px; color: var(--text-dim);">
+            ${bet.strategy} | score: ${bet.compositeScore} | urgency: ${bet.urgency}%
+          </div>
+        </div>
+      `;
+    }
+
+    function addLogEntry(entry) {
+      const logEl = document.getElementById('logEntries');
+      const div = document.createElement('div');
+      div.className = 'log-entry';
+
+      const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
+
+      div.innerHTML = `
+        <span class="log-time">${time}</span>
+        <span class="log-type ${entry.type}">${entry.type}</span>
+        <span class="log-msg">${entry.message}</span>
+      `;
+
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+
+      // Keep log manageable
+      while (logEl.children.length > 200) {
+        logEl.removeChild(logEl.firstChild);
+      }
+    }
+
+    function showDestructOverlay(data) {
+      const overlay = document.getElementById('destructOverlay');
+      overlay.classList.add('active');
+      document.getElementById('destructReason').textContent = data.reason || 'Unknown';
+    }
+
+    function updateDestructFinal(data) {
+      document.getElementById('destructFinal').textContent =
+        `Final: $${data.bankrollDollars || '0.00'} | Peak: $${data.peakBankrollDollars || '0.00'}`;
+    }
+
+    function showTargetOverlay(data) {
+      const overlay = document.getElementById('targetOverlay');
+      overlay.classList.add('active');
+      document.getElementById('finalAmount').textContent =
+        `$${parseFloat(data.bankrollDollars || '10000').toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    }
+
+    // ─── P&L Chart (Canvas) ────────────────────────
+    function drawChart() {
+      const canvas = document.getElementById('plChart');
+      const ctx = canvas.getContext('2d');
+      const rect = canvas.parentElement.getBoundingClientRect();
+
+      canvas.width = rect.width * 2;
+      canvas.height = rect.height * 2;
+      canvas.style.width = rect.width + 'px';
+      canvas.style.height = rect.height + 'px';
+      ctx.scale(2, 2);
+
+      const w = rect.width;
+      const h = rect.height;
+      const data = plHistory;
+      const len = data.length;
+
+      if (len < 2) return;
+
+      const min = Math.min(...data) * 0.9;
+      const max = Math.max(...data, startBalance * 1.1) * 1.1;
+      const range = max - min || 1;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid lines
+      ctx.strokeStyle = 'rgba(42, 42, 58, 0.5)';
+      ctx.lineWidth = 0.5;
+      for (let i = 0; i < 5; i++) {
+        const y = (h / 5) * i;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+
+      // Starting line
+      const startY = h - ((startBalance - min) / range) * h;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(0, startY);
+      ctx.lineTo(w, startY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // P&L line
+      const lastVal = data[len - 1];
+      const isProfit = lastVal >= startBalance;
+
+      ctx.beginPath();
+      ctx.strokeStyle = isProfit ? '#00ff88' : '#ff3366';
+      ctx.lineWidth = 2;
+
+      for (let i = 0; i < len; i++) {
+        const x = (i / (len - 1)) * w;
+        const y = h - ((data[i] - min) / range) * h;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Fill under curve
+      const gradient = ctx.createLinearGradient(0, 0, 0, h);
+      if (isProfit) {
+        gradient.addColorStop(0, 'rgba(0, 255, 136, 0.15)');
+        gradient.addColorStop(1, 'rgba(0, 255, 136, 0)');
+      } else {
+        gradient.addColorStop(0, 'rgba(255, 51, 102, 0.15)');
+        gradient.addColorStop(1, 'rgba(255, 51, 102, 0)');
+      }
+
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Current value label
+      ctx.fillStyle = isProfit ? '#00ff88' : '#ff3366';
+      ctx.font = '600 12px SF Mono, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`$${lastVal.toFixed(2)}`, w - 8, 18);
+    }
+
+    // ─── Init ──────────────────────────────────────
+    connect();
+
+    // Fallback: poll status if WebSocket fails
+    setInterval(async () => {
+      if (!ws || ws.readyState !== 1) {
+        try {
+          const res = await fetch('/api/status');
+          const data = await res.json();
+          updateStatus(data);
+        } catch (e) { /* ignore */ }
+      }
+    }, 5000);
+
+    // Initial chart draw
+    setTimeout(drawChart, 100);
+    window.addEventListener('resize', drawChart);
+  </script>
+</body>
+</html>
