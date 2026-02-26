@@ -20,16 +20,19 @@ class KalshiClient {
     this.basePath = '/trade-api/v2';
     this.env = env;
 
-    // Load RSA private key (file path OR base64 env var)
+    // Load RSA private key (base64 env var OR file path)
     let keyData;
     if (process.env.KALSHI_PRIVATE_KEY_BASE64) {
       keyData = Buffer.from(process.env.KALSHI_PRIVATE_KEY_BASE64, 'base64').toString('utf8');
       console.log('[KALSHI] Loaded private key from KALSHI_PRIVATE_KEY_BASE64 env var');
-    } else {
+    } else if (privateKeyPath && fs.existsSync(privateKeyPath)) {
       keyData = fs.readFileSync(privateKeyPath, 'utf8');
       console.log(`[KALSHI] Loaded private key from file: ${privateKeyPath}`);
+    } else {
+      console.warn('[KALSHI] No private key found — bot will run in dry-run mode');
+      keyData = null;
     }
-    this.privateKey = crypto.createPrivateKey(keyData);
+    this.privateKey = keyData ? crypto.createPrivateKey(keyData) : null;
 
     console.log(`[KALSHI] Client initialized — ${env} @ ${this.host}`);
   }
