@@ -32,7 +32,30 @@ class KalshiClient {
       console.warn('[KALSHI] No private key found — bot will run in dry-run mode');
       keyData = null;
     }
-    this.privateKey = keyData ? crypto.createPrivateKey(keyData) : null;
+
+    this.privateKey = null;
+    if (keyData) {
+      // Try multiple key formats — Kalshi keys can vary
+      const formats = [
+        { format: 'pem', type: 'pkcs8' },
+        { format: 'pem', type: 'pkcs1' },
+        { format: 'pem' },
+        {},
+      ];
+      for (const opts of formats) {
+        try {
+          this.privateKey = crypto.createPrivateKey({ key: keyData, ...opts });
+          console.log('[KALSHI] Private key loaded successfully');
+          break;
+        } catch (e) {
+          // Try next format
+        }
+      }
+      if (!this.privateKey) {
+        console.error('[KALSHI] Could not parse private key in any format');
+        console.error('[KALSHI] Key starts with:', keyData.substring(0, 40));
+      }
+    }
 
     console.log(`[KALSHI] Client initialized — ${env} @ ${this.host}`);
   }
