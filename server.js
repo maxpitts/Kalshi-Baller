@@ -102,7 +102,8 @@ app.post('/api/resume', (req, res) => {
 });
 
 app.get('/api/stats', (req, res) => {
-  res.json(bot.strategy.getStats());
+  const status = bot.getStatus();
+  res.json(status.stats);
 });
 
 // ─── Dashboard Route ────────────────────────────────────────────
