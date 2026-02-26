@@ -61,10 +61,10 @@ class StrategyEngine {
     const viable = opps.filter((o) => {
       return (
         o.compositeScore >= adjustedMinEdge &&
-        o.volume > 0 &&
-        o.cheapPrice >= 2 && // At least 2 cents (not dust)
-        o.cheapPrice <= 40 && // Max 40 cents (need upside)
-        o.potentialMultiple >= 1.5 // At least 1.5x payoff
+        o.volume >= 10 && // Need real liquidity
+        o.cheapPrice >= 3 && // At least 3 cents
+        o.cheapPrice <= 60 && // Up to 60 cents (wider range)
+        o.potentialMultiple >= 1.2 // At least 1.2x payoff
       );
     });
 
@@ -121,7 +121,7 @@ class StrategyEngine {
   _momentumStrategy(opps, bankrollCents, urgency) {
     // Sort by volume — chase the crowd
     const byVolume = [...opps]
-      .filter((o) => o.volume > 50 && o.cheapPrice >= 5 && o.cheapPrice <= 60)
+      .filter((o) => o.volume >= 20 && o.cheapPrice >= 5 && o.cheapPrice <= 70)
       .sort((a, b) => b.volume - a.volume);
 
     if (byVolume.length === 0) return null;
@@ -158,7 +158,7 @@ class StrategyEngine {
 
   _fullSendStrategy(opps, bankrollCents, urgency) {
     // ALL IN on the single best opportunity
-    const viable = opps.filter((o) => o.cheapPrice >= 2 && o.cheapPrice <= 30);
+    const viable = opps.filter((o) => o.cheapPrice >= 3 && o.cheapPrice <= 50 && o.volume >= 5);
 
     if (viable.length === 0) return null;
 
