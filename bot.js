@@ -180,34 +180,41 @@ class YoloEngine extends EventEmitter {
         return;
       }
 
-      // Get strategy decision
-      const bet = this.strategy.decideBet(
-        opportunities,
-        this.bankroll,
-        timeRemaining / (1000 * 60 * 60) // Convert to hours
-      );
+      // Get strategy decision(s) — may return multiple bets
+      const bets = this.strategy.decideBets
+        ? this.strategy.decideBets(opportunities, this.bankroll, timeRemaining / (1000 * 60 * 60))
+        : [this.strategy.decideBet(opportunities, this.bankroll, timeRemaining / (1000 * 60 * 60))].filter(Boolean);
 
-      if (!bet) {
-        this._log('STRATEGY', 'No viable bet this cycle — waiting');
+      if (!bets || bets.length === 0) {
+        this._log('STRATEGY', 'No viable bets this cycle — waiting');
         this.state = BOT_STATES.WAITING;
         this.emit('status', this.getStatus());
         return;
       }
 
-      // Skip if we already have an active bet on this ticker
-      if (this.activeBet && this.activeBet.ticker === bet.ticker) {
-        this._log('SKIP', `Already have active bet on ${bet.ticker}`);
-        return;
-      }
+      // Execute each bet
+      for (const bet of bets) {
+        // Skip if we already have a position on this ticker
+        if (this.strategy.activePositionTickers && this.strategy.activePositionTickers.has(bet.ticker)) {
+          this._log('SKIP', `Already positioned in ${bet.ticker}`);
+          continue;
+        }
 
-      // Execute the bet
-      this._log('BET', bet.reasoning);
-      this.emit('bet_signal', { bet, opportunities: opportunities.slice(0, 5) });
+        // Check we still have enough bankroll
+        if (bet.totalCost > this.bankroll && !this.config.dryRun) {
+          this._log('SKIP', `Not enough bankroll for ${bet.ticker} (need ${bet.totalCost}¢, have ${this.bankroll}¢)`);
+          continue;
+        }
 
-      if (!this.config.dryRun) {
-        await this._executeBet(bet);
-      } else {
-        this._simulateBet(bet);
+        this._log('BET', bet.reasoning);
+        this.emit('bet_signal', { bet, opportunities: opportunities.slice(0, 5) });
+
+        if (!this.config.dryRun) {
+          await this._executeBet(bet);
+          await new Promise(r => setTimeout(r, 500)); // Rate limit between orders
+        } else {
+          this._simulateBet(bet);
+        }
       }
     } catch (e) {
       this._log('ERROR', `Cycle error: ${e.message}`);
@@ -283,6 +290,11 @@ class YoloEngine extends EventEmitter {
 
       this._log('ORDER', `Placed: ${order.order_id} | Status: ${order.status}`);
       this.emit('order_placed', this.activeBet);
+
+      // Track position in strategy engine
+      if (this.strategy.markPositionActive) {
+        this.strategy.markPositionActive(bet.ticker);
+      }
 
       // Update bankroll estimate
       if (order.status === 'executed' || order.status === 'filled') {
