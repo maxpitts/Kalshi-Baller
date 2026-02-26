@@ -1,0 +1,17 @@
+{
+  "name": "yolo-engine",
+  "version": "1.0.0",
+  "description": "Kalshi aggressive compounding bot — turn $100 into $10,000 or self-destruct trying",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "bot-only": "node bot.js",
+    "demo": "KALSHI_ENV=demo node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "uuid": "^9.0.0",
+    "dotenv": "^16.3.1"
+  }
+}
