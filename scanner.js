@@ -127,23 +127,27 @@ class MarketScanner {
     const volume = market.volume || 0;
     const volumeScore = Math.min(Math.log10(Math.max(volume, 1)) / 5, 1);
 
-    // 4. TIME SCORE — Contracts expiring soon resolve faster
+    // 4. TIME SCORE — Contracts expiring soon resolve faster = faster compounding
     const expirationTs = market.expiration_time
       ? new Date(market.expiration_time).getTime()
       : Date.now() + 7 * 24 * 60 * 60 * 1000;
     const hoursToExpiry = Math.max((expirationTs - Date.now()) / (1000 * 60 * 60), 0.1);
-    const timeScore = hoursToExpiry <= 48 ? 1 : hoursToExpiry <= 168 ? 0.5 : 0.2;
+    const timeScore = hoursToExpiry <= 6 ? 1.0     // Expiring within 6h = highest priority
+                    : hoursToExpiry <= 24 ? 0.85    // Within 24h = great
+                    : hoursToExpiry <= 48 ? 0.6     // Within 48h = good
+                    : hoursToExpiry <= 168 ? 0.3    // Within a week = okay
+                    : 0.1;                          // Longer = low priority
 
     // 5. FEE IMPACT — Lower fees = better effective edge
     const fee = MarketScanner.calcFee(cheapPrice);
     const feeImpact = 1 - (fee / cheapPrice); // Fee as % of price
 
-    // COMPOSITE SCORE
+    // COMPOSITE SCORE — Weighted toward speed + liquidity
     const compositeScore =
-      (edgeScore * 0.25) +
-      (asymmetryScore * 0.30) +
-      (volumeScore * 0.20) +
-      (timeScore * 0.15) +
+      (edgeScore * 0.15) +
+      (asymmetryScore * 0.20) +
+      (volumeScore * 0.30) +     // Volume is king — need fills
+      (timeScore * 0.25) +       // Fast expiry = fast compounding
       (feeImpact * 0.10);
 
     return {
