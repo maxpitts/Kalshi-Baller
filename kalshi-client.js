@@ -9,7 +9,7 @@ const fs = require('fs');
 const https = require('https');
 
 const HOSTS = {
-  production: 'api.elections.kalshi.com',
+  production: 'trading-api.kalshi.com',
   demo: 'demo-api.kalshi.co',
 };
 
