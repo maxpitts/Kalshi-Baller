@@ -66,6 +66,13 @@ class YoloEngine extends EventEmitter {
     this.scanInterval = null;
     this.positionCheckInterval = null;
     this.activeBet = null;
+    this.activeOrders = new Map();
+    this.processedFills = new Set();
+    this.countedFills = new Set();
+    this.totalBetsPlaced = 0;
+    this.totalWins = 0;
+    this.totalLosses = 0;
+    this.totalWagered = 0;
 
     // Event log
     this.eventLog = [];
@@ -239,14 +246,10 @@ class YoloEngine extends EventEmitter {
       let fillPrice = bet.pricePerContract;
       try {
         const ob = await this.client.getOrderbook(bet.ticker, 5);
-        // In Kalshi binary markets: yes bid at X = no ask at (100-X)
-        // To BUY yes, we need to match a no bid (which is a yes ask at 100-noBid)
-        // To BUY no, we need to match a yes bid (which is a no ask at 100-yesBid)
         const yesBids = ob?.yes || [];
         const noBids = ob?.no || [];
         
         if (bet.side === 'yes' && noBids.length > 0) {
-          // Best no bid → yes ask = 100 - noBid
           const bestNoBid = Array.isArray(noBids[0]) ? noBids[0][0] : noBids[0];
           const yesAsk = 100 - bestNoBid;
           fillPrice = Math.max(fillPrice, yesAsk);
@@ -258,14 +261,13 @@ class YoloEngine extends EventEmitter {
           this._log('ORDERBOOK', `NO ask: ${noAsk}¢ (from YES bid: ${bestYesBid}¢)`);
         }
         
-        // Add 1-2 cents of price improvement to ensure fill
         fillPrice = Math.min(fillPrice + 2, 95);
       } catch (e) {
         this._log('ORDERBOOK', `Couldn't fetch orderbook, using scanner price: ${fillPrice}¢`);
       }
 
       // Recalculate contracts at the actual fill price
-      const maxSpend = bet.totalCost + (bet.totalCost * 0.1); // Allow 10% more
+      const maxSpend = bet.totalCost + (bet.totalCost * 0.1);
       const numContracts = Math.max(1, Math.floor(Math.min(this.bankroll, maxSpend) / fillPrice));
       
       this._log('EXEC', `${bet.side.toUpperCase()} ${numContracts}x ${bet.ticker} @ ${fillPrice}¢ (scanner: ${bet.pricePerContract}¢)`);
@@ -281,31 +283,41 @@ class YoloEngine extends EventEmitter {
         clientOrderId: crypto.randomUUID(),
       });
 
-      this.activeBet = {
+      const trackedOrder = {
         ...bet,
+        fillPrice,
+        numContracts,
+        totalCost: numContracts * fillPrice,
         orderId: order.order_id,
         status: order.status,
         placedAt: Date.now(),
       };
 
-      this._log('ORDER', `Placed: ${order.order_id} | Status: ${order.status}`);
-      this.emit('order_placed', this.activeBet);
+      // Track in active orders map
+      this.activeOrders.set(order.order_id, trackedOrder);
+      this.activeBet = trackedOrder; // Keep for backward compat with dashboard
+
+      this._log('ORDER', `Placed: ${order.order_id} | Status: ${order.status} | Cost: $${(trackedOrder.totalCost / 100).toFixed(2)}`);
+      this.emit('order_placed', trackedOrder);
+      this.emit('bet_signal', { bet: trackedOrder, opportunities: [] });
 
       // Track position in strategy engine
       if (this.strategy.markPositionActive) {
         this.strategy.markPositionActive(bet.ticker);
       }
 
-      // Update bankroll estimate
+      // If immediately filled, record it
       if (order.status === 'executed' || order.status === 'filled') {
-        this.bankroll -= bet.totalCost + bet.estimatedFees;
-        this.emit('status', this.getStatus());
+        this.totalBetsPlaced++;
+        this.totalWagered += trackedOrder.totalCost;
+        this._log('FILLED', `✓ ${bet.ticker} filled immediately | ${numContracts} contracts @ ${fillPrice}¢`);
+        this.emit('bet_result', { ...trackedOrder, outcome: 'placed', profit: 0 });
       }
 
       this.state = BOT_STATES.WAITING;
+      this.emit('status', this.getStatus());
     } catch (e) {
       this._log('ORDER_ERROR', `Failed to place order: ${e.message}`);
-      this.activeBet = null;
       this.state = BOT_STATES.SCANNING;
       this.emit('order_error', { bet, error: e.message });
     }
@@ -314,9 +326,8 @@ class YoloEngine extends EventEmitter {
   _simulateBet(bet) {
     this.state = BOT_STATES.BETTING;
 
-    // Simulate: 40% win rate for aggressive strategies
     const roll = Math.random();
-    const winProb = 0.1 + (bet.pricePerContract / 100) * 0.8; // Rough heuristic
+    const winProb = 0.1 + (bet.pricePerContract / 100) * 0.8;
 
     const simResult = {
       ...bet,
@@ -325,17 +336,20 @@ class YoloEngine extends EventEmitter {
       placedAt: Date.now(),
     };
 
+    this.totalBetsPlaced++;
+    this.totalWagered += bet.totalCost;
+
     if (roll < winProb) {
-      // WIN
       const profit = bet.potentialPayout - bet.totalCost;
       this.bankroll += profit;
       this.peakBankroll = Math.max(this.peakBankroll, this.bankroll);
+      this.totalWins++;
       this.strategy.recordBet(bet, 'win');
       this._log('SIM_WIN', `+$${(profit / 100).toFixed(2)} | New balance: $${(this.bankroll / 100).toFixed(2)}`);
       this.emit('bet_result', { ...simResult, outcome: 'win', profit });
     } else {
-      // LOSS
       this.bankroll -= bet.totalCost;
+      this.totalLosses++;
       this.strategy.recordBet(bet, 'loss');
       this._log('SIM_LOSS', `-$${(bet.totalCost / 100).toFixed(2)} | New balance: $${(this.bankroll / 100).toFixed(2)}`);
       this.emit('bet_result', { ...simResult, outcome: 'loss', profit: -bet.totalCost });
@@ -353,24 +367,45 @@ class YoloEngine extends EventEmitter {
 
     try {
       // Refresh balance
-      const balance = await this.client.getBalance();
-      this.bankroll = balance;
+      const newBalance = await this.client.getBalance();
+      const balanceChange = newBalance - this.bankroll;
+      this.bankroll = newBalance;
       this.peakBankroll = Math.max(this.peakBankroll, this.bankroll);
 
-      // Check positions
+      // Check for balance changes (indicates a fill or settlement)
+      if (balanceChange !== 0 && this.totalBetsPlaced > 0) {
+        if (balanceChange > 0) {
+          this._log('💰 PROFIT', `Balance +$${(balanceChange / 100).toFixed(2)} → $${(this.bankroll / 100).toFixed(2)}`);
+        } else {
+          this._log('📉 SPENT', `Balance $${(balanceChange / 100).toFixed(2)} → $${(this.bankroll / 100).toFixed(2)}`);
+        }
+      }
+
+      // Check current positions
       this.positions = await this.client.getPositions({ limit: 100 });
 
-      // Cancel stale resting orders (older than 60 seconds)
-      if (this.activeBet && this.activeBet.orderId) {
-        const age = Date.now() - (this.activeBet.placedAt || 0);
-        if (age > 60000 && this.activeBet.status !== 'executed' && this.activeBet.status !== 'filled') {
+      // Check fills to track what actually executed
+      try {
+        const fills = await this.client.getFills({ limit: 20 });
+        this._processFills(fills);
+      } catch (e) {
+        // Non-fatal
+      }
+
+      // Cancel stale resting orders (older than 90 seconds)
+      for (const [orderId, order] of this.activeOrders) {
+        const age = Date.now() - (order.placedAt || 0);
+        if (age > 90000) {
           try {
-            await this.client.cancelOrder(this.activeBet.orderId);
-            this._log('CANCEL', `Stale order ${this.activeBet.orderId.slice(0,8)}... cancelled after ${Math.round(age/1000)}s`);
+            await this.client.cancelOrder(orderId);
+            this._log('CANCEL', `Stale order ${orderId.slice(0, 8)}... cancelled after ${Math.round(age / 1000)}s`);
           } catch (e) {
-            // Order might already be filled or cancelled
+            // Already filled or cancelled
           }
-          this.activeBet = null;
+          this.activeOrders.delete(orderId);
+          if (this.strategy.markPositionClosed) {
+            this.strategy.markPositionClosed(order.ticker);
+          }
         }
       }
 
@@ -379,9 +414,40 @@ class YoloEngine extends EventEmitter {
         positions: this.positions,
         peakBankroll: this.peakBankroll,
       });
+      this.emit('status', this.getStatus());
     } catch (e) {
-      // Non-fatal — just log it
       console.warn(`[BOT] Position check failed: ${e.message}`);
+    }
+  }
+
+  _processFills(fills) {
+    if (!fills || fills.length === 0) return;
+
+    for (const fill of fills) {
+      const fillId = fill.trade_id || fill.order_id;
+      if (this.processedFills.has(fillId)) continue;
+      this.processedFills.add(fillId);
+
+      // Only track recent fills (last 5 minutes)
+      const fillTime = fill.created_time ? new Date(fill.created_time).getTime() : Date.now();
+      if (Date.now() - fillTime > 300000) continue;
+
+      const side = fill.side || 'unknown';
+      const count = fill.count || 0;
+      const price = fill.yes_price || fill.no_price || 0;
+      const ticker = fill.ticker || 'unknown';
+
+      if (!this.processedFills.has(`logged-${fillId}`)) {
+        this.processedFills.add(`logged-${fillId}`);
+        this._log('FILL', `${side.toUpperCase()} ${count}x ${ticker} @ ${price}¢`);
+        
+        // Count as a placed bet
+        if (!this.countedFills.has(fillId)) {
+          this.countedFills.add(fillId);
+          this.totalBetsPlaced++;
+          this.totalWagered += count * price;
+        }
+      }
     }
   }
 
@@ -449,7 +515,19 @@ class YoloEngine extends EventEmitter {
     const timeRemaining = this._getTimeRemaining();
     const elapsed = this.startTime ? Date.now() - this.startTime : 0;
     const progress = this.bankroll / this.config.targetBankroll;
-    const stats = this.strategy.getStats();
+    const strategyStats = this.strategy.getStats();
+
+    // Merge bot-level live tracking with strategy stats
+    const stats = {
+      ...strategyStats,
+      totalBets: this.totalBetsPlaced || strategyStats.totalBets,
+      wins: this.totalWins || strategyStats.wins,
+      losses: this.totalLosses || strategyStats.losses,
+      winRate: this.totalBetsPlaced > 0 
+        ? this.totalWins / this.totalBetsPlaced 
+        : strategyStats.winRate,
+      totalWagered: this.totalWagered || strategyStats.totalWagered || 0,
+    };
 
     return {
       state: this.state,
@@ -459,7 +537,7 @@ class YoloEngine extends EventEmitter {
       peakBankrollDollars: (this.peakBankroll / 100).toFixed(2),
       targetBankroll: this.config.targetBankroll,
       targetDollars: (this.config.targetBankroll / 100).toFixed(2),
-      progress: Math.round(progress * 10000) / 100, // percentage
+      progress: Math.round(progress * 10000) / 100,
       startTime: this.startTime,
       elapsed,
       elapsedFormatted: this._formatDuration(elapsed),
@@ -474,7 +552,9 @@ class YoloEngine extends EventEmitter {
       dryRun: this.config.dryRun,
       stats,
       activeBet: this.activeBet,
+      activeOrders: Array.from(this.activeOrders.values()),
       positionCount: this.positions.length,
+      positions: this.positions,
       eventLog: this.eventLog.slice(-100),
     };
   }
