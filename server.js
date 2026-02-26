@@ -48,7 +48,7 @@ const botConfig = {
   maxBetFraction: parseFloat(process.env.MAX_BET_FRACTION || '0.5'),
   minEdge: parseFloat(process.env.MIN_EDGE_THRESHOLD || '0.05'),
   destructMode: process.env.DESTRUCT_MODE || 'withdraw',
-  dryRun: !process.env.KALSHI_API_KEY_ID || process.env.DRY_RUN === 'true',
+  dryRun: !process.env.KALSHI_API_KEY_ID || !process.env.KALSHI_PRIVATE_KEY_BASE64 || process.env.DRY_RUN === 'true',
 };
 
 const bot = new YoloEngine(botConfig);
