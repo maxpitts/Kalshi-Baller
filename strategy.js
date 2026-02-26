@@ -1,228 +1,339 @@
 /**
  * ═══════════════════════════════════════════════════════════════
- * STRATEGY ENGINE — Compounding Bet Sizing & Selection
+ * STRATEGY ENGINE v2 — Sniper + Multi-Position + Compounding
  * ═══════════════════════════════════════════════════════════════
  *
- * Three modes:
+ * Five modes:
+ *  sniper       — Target contracts expiring within hours, high conviction
  *  edge_hunter  — Kelly-adjacent sizing on mispriced contracts
+ *  multi_spread — Spread across 3-5 markets simultaneously
  *  momentum     — Chase volume spikes and price movement
  *  full_send    — All-in on the single best opportunity
  */
 
 class StrategyEngine {
   constructor(config = {}) {
-    this.mode = config.mode || 'edge_hunter';
+    this.mode = config.mode || 'sniper';
     this.maxBetFraction = config.maxBetFraction || 0.5;
     this.minEdge = config.minEdge || 0.05;
-    this.targetMultiple = config.targetMultiple || 100; // 100x ($100 → $10k)
+    this.targetMultiple = config.targetMultiple || 100;
+    this.maxSimultaneousPositions = config.maxPositions || 4;
 
     // Track performance
     this.betHistory = [];
     this.wins = 0;
     this.losses = 0;
     this.totalWagered = 0;
+    this.activePositionTickers = new Set();
 
-    console.log(`[STRATEGY] Mode: ${this.mode} | Max bet: ${this.maxBetFraction * 100}% | Min edge: ${this.minEdge}`);
+    console.log(`[STRATEGY] Mode: ${this.mode} | Max bet: ${this.maxBetFraction * 100}% | Max positions: ${this.maxSimultaneousPositions}`);
   }
 
-  // ─── Main Decision: What to bet on ───────────────────────────
+  // ─── Main Decision ────────────────────────────────────────────
 
-  decideBet(opportunities, bankrollCents, timeRemainingHours) {
-    if (!opportunities || opportunities.length === 0) {
-      return null;
-    }
+  decideBets(opportunities, bankrollCents, timeRemainingHours) {
+    if (!opportunities || opportunities.length === 0) return [];
 
     const bankrollDollars = bankrollCents / 100;
     const urgency = this._calcUrgency(bankrollDollars, timeRemainingHours);
 
+    // Filter out markets we already have positions in
+    const fresh = opportunities.filter(o => !this.activePositionTickers.has(o.ticker));
+
     switch (this.mode) {
+      case 'sniper':
+        return this._sniperStrategy(fresh, bankrollCents, urgency);
+      case 'multi_spread':
+        return this._multiSpreadStrategy(fresh, bankrollCents, urgency);
       case 'edge_hunter':
-        return this._edgeHunterStrategy(opportunities, bankrollCents, urgency);
+        return [this._edgeHunterStrategy(fresh, bankrollCents, urgency)].filter(Boolean);
       case 'momentum':
-        return this._momentumStrategy(opportunities, bankrollCents, urgency);
+        return [this._momentumStrategy(fresh, bankrollCents, urgency)].filter(Boolean);
       case 'full_send':
-        return this._fullSendStrategy(opportunities, bankrollCents, urgency);
+        return [this._fullSendStrategy(fresh, bankrollCents, urgency)].filter(Boolean);
       default:
-        return this._edgeHunterStrategy(opportunities, bankrollCents, urgency);
+        return this._sniperStrategy(fresh, bankrollCents, urgency);
     }
   }
 
-  // ─── Edge Hunter Strategy ─────────────────────────────────────
+  // Keep backward compat
+  decideBet(opportunities, bankrollCents, timeRemainingHours) {
+    const bets = this.decideBets(opportunities, bankrollCents, timeRemainingHours);
+    return bets.length > 0 ? bets[0] : null;
+  }
 
+  // ─── SNIPER STRATEGY ──────────────────────────────────────────
   /**
-   * Finds contracts where the market price seems mispriced
-   * Uses Kelly-adjacent sizing: bet more when edge is higher
-   * Focuses on cheap contracts with high asymmetric payoff
+   * The money maker. Targets contracts that:
+   * 1. Expire within 1-24 hours (fast resolution = fast compounding)
+   * 2. Have strong directional conviction (price > 75¢ or < 25¢)
+   * 3. Have real volume (people are trading, not ghost markets)
+   *
+   * Logic: If a contract is trading at 90¢ YES with 2 hours left,
+   * the market is 90% confident it'll resolve YES. Buy YES at 90¢,
+   * make 10¢ per contract if correct — that's 11% return in 2 hours.
+   * Compound that 7 times = 2x. Do it 20 times = 100x.
    */
+  _sniperStrategy(opps, bankrollCents, urgency) {
+    const bets = [];
+    const slotsAvailable = this.maxSimultaneousPositions - this.activePositionTickers.size;
+    if (slotsAvailable <= 0) return [];
+
+    // TIER 1: "Almost certain" — expiring soon, high conviction
+    // Buy the likely winner at 80-97¢, collect 3-20¢ profit per contract
+    const sniperTargets = opps
+      .filter(o => {
+        const expiresWithin24h = o.hoursToExpiry <= 24;
+        const hasVolume = o.volume >= 20;
+        const highConviction = o.yesPrice >= 75 || o.yesPrice <= 25; // Strong lean
+        const notTooExpensive = Math.min(o.yesPrice, o.noPrice) <= 97; // Some upside left
+        return expiresWithin24h && hasVolume && highConviction && notTooExpensive;
+      })
+      .sort((a, b) => {
+        // Sort by: quickest expiry first, then by volume
+        const timeA = a.hoursToExpiry;
+        const timeB = b.hoursToExpiry;
+        if (Math.abs(timeA - timeB) > 2) return timeA - timeB;
+        return b.volume - a.volume;
+      });
+
+    // TIER 2: "Asymmetric longshots" — cheap contracts that could pop
+    // Buy contracts at 3-15¢ that resolve within 48h
+    const longshots = opps
+      .filter(o => {
+        const expiresWithin48h = o.hoursToExpiry <= 48;
+        const hasVolume = o.volume >= 10;
+        const isCheap = o.cheapPrice >= 3 && o.cheapPrice <= 15;
+        return expiresWithin48h && hasVolume && isCheap;
+      })
+      .sort((a, b) => a.cheapPrice - b.cheapPrice); // Cheapest first
+
+    // Allocate bankroll: 70% to sniper bets, 30% to longshots
+    const sniperBudget = Math.floor(bankrollCents * 0.7);
+    const longshotBudget = Math.floor(bankrollCents * 0.3);
+
+    // Place sniper bets
+    const sniperSlots = Math.min(Math.ceil(slotsAvailable * 0.6), sniperTargets.length, 3);
+    const perSniperBet = sniperSlots > 0 ? Math.floor(sniperBudget / sniperSlots) : 0;
+
+    for (let i = 0; i < sniperSlots; i++) {
+      const pick = sniperTargets[i];
+      // Buy the winning side
+      const side = pick.yesPrice >= 75 ? 'yes' : 'no';
+      const price = side === 'yes' ? pick.yesPrice : pick.noPrice;
+      const numContracts = Math.max(1, Math.floor(perSniperBet / price));
+      const cost = numContracts * price;
+      const profit = numContracts * (100 - price);
+
+      bets.push(this._buildBet(pick, {
+        side,
+        numContracts,
+        pricePerContract: price,
+        totalCost: cost,
+        potentialPayout: numContracts * 100,
+        potentialMultiple: Math.round(((numContracts * 100) / cost) * 10) / 10,
+        urgency: Math.round(urgency * 100),
+        strategy: 'sniper',
+        reasoning: `🎯 SNIPER: ${side.toUpperCase()} @ ${price}¢ | ${pick.hoursToExpiry}h to expiry | +$${(profit/100).toFixed(2)} if correct | Vol: ${pick.volume}`,
+      }));
+    }
+
+    // Place longshot bets
+    const longshotSlots = Math.min(slotsAvailable - sniperSlots, longshots.length, 2);
+    const perLongshotBet = longshotSlots > 0 ? Math.floor(longshotBudget / longshotSlots) : 0;
+
+    for (let i = 0; i < longshotSlots; i++) {
+      const pick = longshots[i];
+      const numContracts = Math.max(1, Math.floor(perLongshotBet / pick.cheapPrice));
+      const cost = numContracts * pick.cheapPrice;
+
+      bets.push(this._buildBet(pick, {
+        side: pick.bestSide,
+        numContracts,
+        pricePerContract: pick.cheapPrice,
+        totalCost: cost,
+        potentialPayout: numContracts * 100,
+        potentialMultiple: Math.round(((numContracts * 100) / cost) * 10) / 10,
+        urgency: Math.round(urgency * 100),
+        strategy: 'sniper_longshot',
+        reasoning: `🎲 LONGSHOT: ${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢ | ${pick.potentialMultiple}x if it hits | ${pick.hoursToExpiry}h left`,
+      }));
+    }
+
+    return bets;
+  }
+
+  // ─── MULTI-SPREAD STRATEGY ────────────────────────────────────
+  /**
+   * Diversify across 3-5 markets simultaneously.
+   * Sizes each position to risk equal amounts.
+   */
+  _multiSpreadStrategy(opps, bankrollCents, urgency) {
+    const bets = [];
+    const slotsAvailable = this.maxSimultaneousPositions - this.activePositionTickers.size;
+    if (slotsAvailable <= 0) return [];
+
+    const viable = opps.filter(o =>
+      o.volume >= 15 &&
+      o.cheapPrice >= 5 &&
+      o.cheapPrice <= 50 &&
+      o.hoursToExpiry <= 72 &&
+      o.compositeScore >= this.minEdge * 0.5
+    );
+
+    const numBets = Math.min(slotsAvailable, viable.length, 4);
+    if (numBets === 0) return [];
+
+    const perBet = Math.floor(bankrollCents / numBets);
+
+    for (let i = 0; i < numBets; i++) {
+      const pick = viable[i];
+      const numContracts = Math.max(1, Math.floor(perBet / pick.cheapPrice));
+      const cost = numContracts * pick.cheapPrice;
+
+      bets.push(this._buildBet(pick, {
+        side: pick.bestSide,
+        numContracts,
+        pricePerContract: pick.cheapPrice,
+        totalCost: cost,
+        potentialPayout: numContracts * 100,
+        potentialMultiple: Math.round(((numContracts * 100) / cost) * 10) / 10,
+        urgency: Math.round(urgency * 100),
+        strategy: 'multi_spread',
+        reasoning: `📊 SPREAD ${i+1}/${numBets}: ${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢ | ${pick.potentialMultiple}x | Vol: ${pick.volume}`,
+      }));
+    }
+
+    return bets;
+  }
+
+  // ─── EDGE HUNTER ──────────────────────────────────────────────
+
   _edgeHunterStrategy(opps, bankrollCents, urgency) {
-    // Filter by minimum edge threshold (adjusted by urgency)
     const adjustedMinEdge = this.minEdge * Math.max(0.3, 1 - urgency * 0.7);
-
-    const viable = opps.filter((o) => {
-      return (
-        o.compositeScore >= adjustedMinEdge &&
-        o.volume >= 10 && // Need real liquidity
-        o.cheapPrice >= 3 && // At least 3 cents
-        o.cheapPrice <= 60 && // Up to 60 cents (wider range)
-        o.potentialMultiple >= 1.2 // At least 1.2x payoff
-      );
-    });
-
+    const viable = opps.filter(o =>
+      o.compositeScore >= adjustedMinEdge &&
+      o.volume >= 10 &&
+      o.cheapPrice >= 3 && o.cheapPrice <= 60 &&
+      o.potentialMultiple >= 1.2
+    );
     if (viable.length === 0) return null;
 
-    // Pick the top opportunity
     const pick = viable[0];
-
-    // Kelly-adjacent sizing
-    // Simplified Kelly: f = edge / odds
-    // But we cap it and adjust for aggression
     const estimatedEdge = pick.compositeScore;
     const odds = pick.potentialMultiple;
     const kellyFraction = Math.min(estimatedEdge / (odds > 0 ? odds : 1), 0.5);
-
-    // Scale by urgency — more aggressive as time runs out
-    const aggressionMultiplier = 1 + urgency * 2; // 1x → 3x
+    const aggressionMultiplier = 1 + urgency * 2;
     let betFraction = Math.min(kellyFraction * aggressionMultiplier, this.maxBetFraction);
-
-    // Minimum bet: 5% of bankroll or $1 (whichever is higher)
     const minBetCents = Math.max(bankrollCents * 0.05, 100);
     let betAmountCents = Math.max(Math.floor(bankrollCents * betFraction), minBetCents);
-    betAmountCents = Math.min(betAmountCents, bankrollCents); // Can't bet more than we have
-
-    // Calculate contracts
-    const pricePerContractCents = pick.cheapPrice;
-    const numContracts = Math.max(1, Math.floor(betAmountCents / pricePerContractCents));
-    const actualCostCents = numContracts * pricePerContractCents;
-
-    // Fee estimate
-    const feePer = 0.07 * (pricePerContractCents / 100) * (1 - pricePerContractCents / 100);
-    const totalFeeCents = Math.round(feePer * numContracts * 100);
-
-    return {
-      ticker: pick.ticker,
-      title: pick.title,
-      side: pick.bestSide,
-      action: 'buy',
-      numContracts,
-      pricePerContract: pricePerContractCents,
-      totalCost: actualCostCents,
-      estimatedFees: totalFeeCents,
-      potentialPayout: numContracts * 100, // Each contract pays $1 if correct
-      potentialMultiple: Math.round(((numContracts * 100) / actualCostCents) * 10) / 10,
-      compositeScore: pick.compositeScore,
-      urgency: Math.round(urgency * 100),
-      strategy: 'edge_hunter',
-      reasoning: `${pick.bestSide.toUpperCase()} @ ${pricePerContractCents}¢ | ${pick.potentialMultiple}x payoff | Score: ${pick.compositeScore} | Urgency: ${Math.round(urgency * 100)}%`,
-    };
-  }
-
-  // ─── Momentum Strategy ────────────────────────────────────────
-
-  _momentumStrategy(opps, bankrollCents, urgency) {
-    // Sort by volume — chase the crowd
-    const byVolume = [...opps]
-      .filter((o) => o.volume >= 20 && o.cheapPrice >= 5 && o.cheapPrice <= 70)
-      .sort((a, b) => b.volume - a.volume);
-
-    if (byVolume.length === 0) return null;
-
-    const pick = byVolume[0];
-
-    // Momentum bets are more moderate sized
-    const betFraction = Math.min(0.25 + urgency * 0.25, this.maxBetFraction);
-    let betAmountCents = Math.max(Math.floor(bankrollCents * betFraction), 100);
     betAmountCents = Math.min(betAmountCents, bankrollCents);
 
     const numContracts = Math.max(1, Math.floor(betAmountCents / pick.cheapPrice));
     const actualCostCents = numContracts * pick.cheapPrice;
 
-    return {
-      ticker: pick.ticker,
-      title: pick.title,
+    return this._buildBet(pick, {
       side: pick.bestSide,
-      action: 'buy',
       numContracts,
       pricePerContract: pick.cheapPrice,
       totalCost: actualCostCents,
-      estimatedFees: 0,
       potentialPayout: numContracts * 100,
       potentialMultiple: Math.round(((numContracts * 100) / actualCostCents) * 10) / 10,
-      compositeScore: pick.compositeScore,
       urgency: Math.round(urgency * 100),
-      strategy: 'momentum',
-      reasoning: `HIGH VOLUME: ${pick.volume} contracts | ${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢`,
-    };
+      strategy: 'edge_hunter',
+      reasoning: `${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢ | ${pick.potentialMultiple}x | Score: ${pick.compositeScore} | Urgency: ${Math.round(urgency * 100)}%`,
+    });
   }
 
-  // ─── Full Send Strategy ───────────────────────────────────────
+  // ─── MOMENTUM ─────────────────────────────────────────────────
+
+  _momentumStrategy(opps, bankrollCents, urgency) {
+    const byVolume = [...opps]
+      .filter(o => o.volume >= 20 && o.cheapPrice >= 5 && o.cheapPrice <= 70)
+      .sort((a, b) => b.volume - a.volume);
+    if (byVolume.length === 0) return null;
+
+    const pick = byVolume[0];
+    const betFraction = Math.min(0.25 + urgency * 0.25, this.maxBetFraction);
+    let betAmountCents = Math.max(Math.floor(bankrollCents * betFraction), 100);
+    betAmountCents = Math.min(betAmountCents, bankrollCents);
+    const numContracts = Math.max(1, Math.floor(betAmountCents / pick.cheapPrice));
+    const actualCostCents = numContracts * pick.cheapPrice;
+
+    return this._buildBet(pick, {
+      side: pick.bestSide,
+      numContracts,
+      pricePerContract: pick.cheapPrice,
+      totalCost: actualCostCents,
+      potentialPayout: numContracts * 100,
+      potentialMultiple: Math.round(((numContracts * 100) / actualCostCents) * 10) / 10,
+      urgency: Math.round(urgency * 100),
+      strategy: 'momentum',
+      reasoning: `HIGH VOLUME: ${pick.volume} | ${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢`,
+    });
+  }
+
+  // ─── FULL SEND ────────────────────────────────────────────────
 
   _fullSendStrategy(opps, bankrollCents, urgency) {
-    // ALL IN on the single best opportunity
-    const viable = opps.filter((o) => o.cheapPrice >= 3 && o.cheapPrice <= 50 && o.volume >= 5);
-
+    const viable = opps.filter(o => o.cheapPrice >= 3 && o.cheapPrice <= 50 && o.volume >= 5);
     if (viable.length === 0) return null;
 
-    const pick = viable[0]; // Already sorted by composite score
+    const pick = viable[0];
     const numContracts = Math.max(1, Math.floor(bankrollCents / pick.cheapPrice));
     const actualCostCents = numContracts * pick.cheapPrice;
 
-    return {
-      ticker: pick.ticker,
-      title: pick.title,
+    return this._buildBet(pick, {
       side: pick.bestSide,
-      action: 'buy',
       numContracts,
       pricePerContract: pick.cheapPrice,
       totalCost: actualCostCents,
-      estimatedFees: 0,
       potentialPayout: numContracts * 100,
       potentialMultiple: Math.round(((numContracts * 100) / actualCostCents) * 10) / 10,
-      compositeScore: pick.compositeScore,
       urgency: 100,
       strategy: 'full_send',
-      reasoning: `🚀 FULL SEND: ALL-IN on ${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢ | ${pick.potentialMultiple}x potential`,
+      reasoning: `🚀 FULL SEND: ALL-IN ${pick.bestSide.toUpperCase()} @ ${pick.cheapPrice}¢ | ${pick.potentialMultiple}x`,
+    });
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────
+
+  _buildBet(pick, overrides) {
+    return {
+      ticker: pick.ticker,
+      title: pick.title,
+      action: 'buy',
+      hoursToExpiry: pick.hoursToExpiry,
+      category: pick.category,
+      compositeScore: pick.compositeScore,
+      estimatedFees: 0,
+      ...overrides,
     };
   }
 
-  // ─── Urgency Calculator ───────────────────────────────────────
-
-  /**
-   * How aggressively should we bet based on time & progress?
-   * Returns 0-1 (0 = chill, 1 = desperate)
-   */
   _calcUrgency(bankrollDollars, timeRemainingHours) {
     const targetDollars = 10000;
     const startingDollars = 100;
-
-    // Progress towards goal (0 = just started, 1 = at target)
     const progress = Math.max(0, (bankrollDollars - startingDollars) / (targetDollars - startingDollars));
-
-    // Time pressure (0 = plenty of time, 1 = time's up)
     const maxHours = 48;
     const timePressure = Math.max(0, 1 - (timeRemainingHours / maxHours));
-
-    // If we're behind schedule, increase urgency
-    const expectedProgress = timePressure; // Linear expectation
+    const expectedProgress = timePressure;
     const behindSchedule = Math.max(0, expectedProgress - progress);
-
-    // Combine factors
-    const urgency = Math.min(1, timePressure * 0.4 + behindSchedule * 0.6);
-
-    return urgency;
+    return Math.min(1, timePressure * 0.4 + behindSchedule * 0.6);
   }
 
-  // ─── Record Results ───────────────────────────────────────────
+  // ─── Position Tracking ────────────────────────────────────────
+
+  markPositionActive(ticker) { this.activePositionTickers.add(ticker); }
+  markPositionClosed(ticker) { this.activePositionTickers.delete(ticker); }
+  getActivePositionCount() { return this.activePositionTickers.size; }
 
   recordBet(bet, outcome) {
-    this.betHistory.push({
-      ...bet,
-      outcome,
-      timestamp: Date.now(),
-    });
-
+    this.betHistory.push({ ...bet, outcome, timestamp: Date.now() });
     if (outcome === 'win') this.wins++;
     else if (outcome === 'loss') this.losses++;
     this.totalWagered += bet.totalCost;
+    this.activePositionTickers.delete(bet.ticker);
   }
 
   getStats() {
@@ -232,7 +343,8 @@ class StrategyEngine {
       losses: this.losses,
       winRate: this.betHistory.length > 0 ? this.wins / this.betHistory.length : 0,
       totalWagered: this.totalWagered,
-      history: this.betHistory.slice(-50), // Last 50 bets
+      activePositions: this.activePositionTickers.size,
+      history: this.betHistory.slice(-50),
     };
   }
 }
