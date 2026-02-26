@@ -35,17 +35,35 @@ class KalshiClient {
 
     this.privateKey = null;
     if (keyData) {
+      // Debug: show what we got
+      const trimmed = keyData.trim();
+      console.log('[KALSHI] Key length:', trimmed.length);
+      console.log('[KALSHI] Key starts with:', trimmed.substring(0, 50));
+      console.log('[KALSHI] Key ends with:', trimmed.substring(trimmed.length - 50));
+
       // Try multiple key formats — Kalshi keys can vary
       const formats = [
-        { format: 'pem', type: 'pkcs8' },
-        { format: 'pem', type: 'pkcs1' },
-        { format: 'pem' },
-        {},
+        { key: trimmed, format: 'pem', type: 'pkcs8' },
+        { key: trimmed, format: 'pem', type: 'pkcs1' },
+        { key: trimmed, format: 'pem' },
+        { key: trimmed },
       ];
+
+      // Also try wrapping in PEM headers if missing
+      if (!trimmed.startsWith('-----')) {
+        const wrapped = `-----BEGIN RSA PRIVATE KEY-----\n${trimmed}\n-----END RSA PRIVATE KEY-----`;
+        formats.push({ key: wrapped, format: 'pem', type: 'pkcs1' });
+        formats.push({ key: wrapped, format: 'pem' });
+
+        const wrapped8 = `-----BEGIN PRIVATE KEY-----\n${trimmed}\n-----END PRIVATE KEY-----`;
+        formats.push({ key: wrapped8, format: 'pem', type: 'pkcs8' });
+        formats.push({ key: wrapped8, format: 'pem' });
+      }
+
       for (const opts of formats) {
         try {
-          this.privateKey = crypto.createPrivateKey({ key: keyData, ...opts });
-          console.log('[KALSHI] Private key loaded successfully');
+          this.privateKey = crypto.createPrivateKey(opts);
+          console.log('[KALSHI] Private key loaded successfully with format:', JSON.stringify({format: opts.format, type: opts.type}));
           break;
         } catch (e) {
           // Try next format
@@ -53,7 +71,6 @@ class KalshiClient {
       }
       if (!this.privateKey) {
         console.error('[KALSHI] Could not parse private key in any format');
-        console.error('[KALSHI] Key starts with:', keyData.substring(0, 40));
       }
     }
 
