@@ -51,7 +51,7 @@ const botConfig = {
   targetBankroll: parseInt(process.env.TARGET_BANKROLL || '10000') * 100,
   timeLimitHours: parseFloat(process.env.TIME_LIMIT_HOURS || '48'),
   scanIntervalSeconds: parseInt(process.env.SCAN_INTERVAL_SECONDS || '30'),
-  strategyMode: process.env.STRATEGY_MODE || 'edge_hunter',
+  strategyMode: process.env.STRATEGY_MODE || 'sniper',
   maxBetFraction: parseFloat(process.env.MAX_BET_FRACTION || '0.5'),
   minEdge: parseFloat(process.env.MIN_EDGE_THRESHOLD || '0.05'),
   destructMode: process.env.DESTRUCT_MODE || 'withdraw',
