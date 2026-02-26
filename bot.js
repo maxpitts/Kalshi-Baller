@@ -228,14 +228,49 @@ class YoloEngine extends EventEmitter {
     this.emit('status', this.getStatus());
 
     try {
+      // Get live orderbook to find actual ask price
+      let fillPrice = bet.pricePerContract;
+      try {
+        const ob = await this.client.getOrderbook(bet.ticker, 5);
+        // In Kalshi binary markets: yes bid at X = no ask at (100-X)
+        // To BUY yes, we need to match a no bid (which is a yes ask at 100-noBid)
+        // To BUY no, we need to match a yes bid (which is a no ask at 100-yesBid)
+        const yesBids = ob?.yes || [];
+        const noBids = ob?.no || [];
+        
+        if (bet.side === 'yes' && noBids.length > 0) {
+          // Best no bid → yes ask = 100 - noBid
+          const bestNoBid = Array.isArray(noBids[0]) ? noBids[0][0] : noBids[0];
+          const yesAsk = 100 - bestNoBid;
+          fillPrice = Math.max(fillPrice, yesAsk);
+          this._log('ORDERBOOK', `YES ask: ${yesAsk}¢ (from NO bid: ${bestNoBid}¢)`);
+        } else if (bet.side === 'no' && yesBids.length > 0) {
+          const bestYesBid = Array.isArray(yesBids[0]) ? yesBids[0][0] : yesBids[0];
+          const noAsk = 100 - bestYesBid;
+          fillPrice = Math.max(fillPrice, noAsk);
+          this._log('ORDERBOOK', `NO ask: ${noAsk}¢ (from YES bid: ${bestYesBid}¢)`);
+        }
+        
+        // Add 1-2 cents of price improvement to ensure fill
+        fillPrice = Math.min(fillPrice + 2, 95);
+      } catch (e) {
+        this._log('ORDERBOOK', `Couldn't fetch orderbook, using scanner price: ${fillPrice}¢`);
+      }
+
+      // Recalculate contracts at the actual fill price
+      const maxSpend = bet.totalCost + (bet.totalCost * 0.1); // Allow 10% more
+      const numContracts = Math.max(1, Math.floor(Math.min(this.bankroll, maxSpend) / fillPrice));
+      
+      this._log('EXEC', `${bet.side.toUpperCase()} ${numContracts}x ${bet.ticker} @ ${fillPrice}¢ (scanner: ${bet.pricePerContract}¢)`);
+
       const order = await this.client.createOrder({
         ticker: bet.ticker,
         side: bet.side,
         action: bet.action,
-        count: bet.numContracts,
+        count: numContracts,
         type: 'limit',
-        yesPrice: bet.side === 'yes' ? bet.pricePerContract : undefined,
-        noPrice: bet.side === 'no' ? bet.pricePerContract : undefined,
+        yesPrice: bet.side === 'yes' ? fillPrice : undefined,
+        noPrice: bet.side === 'no' ? fillPrice : undefined,
         clientOrderId: crypto.randomUUID(),
       });
 
@@ -312,6 +347,20 @@ class YoloEngine extends EventEmitter {
 
       // Check positions
       this.positions = await this.client.getPositions({ limit: 100 });
+
+      // Cancel stale resting orders (older than 60 seconds)
+      if (this.activeBet && this.activeBet.orderId) {
+        const age = Date.now() - (this.activeBet.placedAt || 0);
+        if (age > 60000 && this.activeBet.status !== 'executed' && this.activeBet.status !== 'filled') {
+          try {
+            await this.client.cancelOrder(this.activeBet.orderId);
+            this._log('CANCEL', `Stale order ${this.activeBet.orderId.slice(0,8)}... cancelled after ${Math.round(age/1000)}s`);
+          } catch (e) {
+            // Order might already be filled or cancelled
+          }
+          this.activeBet = null;
+        }
+      }
 
       this.emit('positions_update', {
         bankroll: this.bankroll,
