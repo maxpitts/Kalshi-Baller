@@ -11,13 +11,20 @@ const { WebSocketServer } = require('ws');
 const path = require('path');
 const { YoloEngine } = require('./bot');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // ─── Express App ────────────────────────────────────────────────
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+// Try multiple paths for static files (handles flat upload vs proper folder structure)
+const publicPaths = [
+  path.join(__dirname, 'public'),
+  __dirname, // fallback: serve from root if public/ doesn't exist
+];
+for (const p of publicPaths) {
+  app.use(express.static(p));
+}
 
 const server = http.createServer(app);
 
@@ -101,7 +108,15 @@ app.get('/api/stats', (req, res) => {
 // ─── Dashboard Route ────────────────────────────────────────────
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  const publicPath = path.join(__dirname, 'public', 'index.html');
+  const rootPath = path.join(__dirname, 'index.html');
+  if (require('fs').existsSync(publicPath)) {
+    res.sendFile(publicPath);
+  } else if (require('fs').existsSync(rootPath)) {
+    res.sendFile(rootPath);
+  } else {
+    res.status(404).send('Dashboard not found. Make sure index.html exists in public/ folder or project root.');
+  }
 });
 
 // ─── Start Server ───────────────────────────────────────────────
