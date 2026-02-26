@@ -35,40 +35,45 @@ class KalshiClient {
 
     this.privateKey = null;
     if (keyData) {
-      // Debug: show what we got
       const trimmed = keyData.trim();
-      console.log('[KALSHI] Key length:', trimmed.length);
-      console.log('[KALSHI] Key starts with:', trimmed.substring(0, 50));
-      console.log('[KALSHI] Key ends with:', trimmed.substring(trimmed.length - 50));
+      console.log('[KALSHI] Key data length:', trimmed.length);
 
-      // Try multiple key formats — Kalshi keys can vary
-      const formats = [
-        { key: trimmed, format: 'pem', type: 'pkcs8' },
-        { key: trimmed, format: 'pem', type: 'pkcs1' },
-        { key: trimmed, format: 'pem' },
-        { key: trimmed },
-      ];
-
-      // Also try wrapping in PEM headers if missing
-      if (!trimmed.startsWith('-----')) {
-        const wrapped = `-----BEGIN RSA PRIVATE KEY-----\n${trimmed}\n-----END RSA PRIVATE KEY-----`;
-        formats.push({ key: wrapped, format: 'pem', type: 'pkcs1' });
-        formats.push({ key: wrapped, format: 'pem' });
-
-        const wrapped8 = `-----BEGIN PRIVATE KEY-----\n${trimmed}\n-----END PRIVATE KEY-----`;
-        formats.push({ key: wrapped8, format: 'pem', type: 'pkcs8' });
-        formats.push({ key: wrapped8, format: 'pem' });
-      }
-
-      for (const opts of formats) {
-        try {
-          this.privateKey = crypto.createPrivateKey(opts);
-          console.log('[KALSHI] Private key loaded successfully with format:', JSON.stringify({format: opts.format, type: opts.type}));
-          break;
-        } catch (e) {
-          // Try next format
+      // Check if it's PEM (text) or DER (binary)
+      if (trimmed.startsWith('-----')) {
+        console.log('[KALSHI] Detected PEM format key');
+        // PEM format — try various types
+        const formats = [
+          { key: trimmed, format: 'pem', type: 'pkcs8' },
+          { key: trimmed, format: 'pem', type: 'pkcs1' },
+          { key: trimmed, format: 'pem' },
+          { key: trimmed },
+        ];
+        for (const opts of formats) {
+          try {
+            this.privateKey = crypto.createPrivateKey(opts);
+            console.log('[KALSHI] PEM key loaded successfully');
+            break;
+          } catch (e) { /* try next */ }
+        }
+      } else {
+        console.log('[KALSHI] Detected binary/DER format key — trying DER decode');
+        // It's binary DER — load from the raw base64 env var directly as a Buffer
+        const derBuffer = Buffer.from(process.env.KALSHI_PRIVATE_KEY_BASE64, 'base64');
+        const derFormats = [
+          { key: derBuffer, format: 'der', type: 'pkcs8' },
+          { key: derBuffer, format: 'der', type: 'pkcs1' },
+        ];
+        for (const opts of derFormats) {
+          try {
+            this.privateKey = crypto.createPrivateKey(opts);
+            console.log('[KALSHI] DER key loaded successfully with type:', opts.type);
+            break;
+          } catch (e) {
+            console.log('[KALSHI] DER', opts.type, 'failed:', e.message);
+          }
         }
       }
+
       if (!this.privateKey) {
         console.error('[KALSHI] Could not parse private key in any format');
       }
