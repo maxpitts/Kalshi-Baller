@@ -90,20 +90,29 @@ class BTCScalper extends EventEmitter {
     let markets = [];
     try {
       // Try series_ticker first
-      const r = await this.kalshi.getMarkets({ series_ticker: 'KXBTC15M', status: 'open', limit: 50 });
+      const r = await this.kalshi.getMarkets({ series_ticker: 'KXBTC15M', status: 'open', limit: 100 });
       markets = r.markets || [];
-    } catch(e) {}
+      this._log('📡 API response', `series_ticker=KXBTC15M → ${markets.length} markets`);
+    } catch(e) {
+      this._log('⚠️ Series fetch failed', e.message);
+    }
 
     if (!markets.length) {
       try {
         // Fallback: search all open markets for BTC
-        const r = await this.kalshi.getMarkets({ status: 'open', limit: 200 });
-        markets = (r.markets || []).filter(m => {
+        const r = await this.kalshi.getMarkets({ status: 'open', limit: 1000 });
+        const allMarkets = r.markets || [];
+        this._log('📡 Fallback search', `${allMarkets.length} total open markets`);
+        markets = allMarkets.filter(m => {
           const t = (m.ticker || '').toUpperCase();
           const title = (m.title || '').toLowerCase();
           return (t.includes('BTC') || t.includes('BITCOIN') || title.includes('bitcoin') || title.includes('btc')) &&
                  (title.includes('15 min') || title.includes('15min') || title.includes('up or down') || t.includes('15M'));
         });
+        this._log('📡 Filtered BTC', `${markets.length} BTC 15m markets found`);
+        if (markets.length > 0) {
+          this._log('📡 Sample ticker', markets[0].ticker + ' | ' + markets[0].title);
+        }
       } catch(e2) { this._log('❌ Market fetch failed', e2.message); return; }
     }
 
@@ -117,8 +126,16 @@ class BTCScalper extends EventEmitter {
       return mins >= 2 && mins <= 25;
     });
 
-    if (!candidates.length) return;
-    this._log('🔍 Markets', `${candidates.length} BTC contracts`);
+    if (!candidates.length) {
+      // Log why we filtered everything
+      const sample = markets[0];
+      const exp = new Date(sample.close_time || sample.expiration_time || sample.expected_expiration_time);
+      const mins = (exp.getTime() - now) / 60000;
+      this._log('🔍 All filtered out', `${markets.length} markets, sample: ${sample.ticker} closes in ${mins.toFixed(1)}min (status:${sample.status})`);
+      this._log('🔍 Sample fields', `close_time=${sample.close_time} exp=${sample.expiration_time} yes_ask=${sample.yes_ask} no_ask=${sample.no_ask}`);
+      return;
+    }
+    this._log('🔍 Markets', `${candidates.length} BTC contracts in window`);
 
     const scored = [];
     for (const m of candidates.slice(0, 8)) {
@@ -135,11 +152,19 @@ class BTCScalper extends EventEmitter {
   }
 
   async _analyze(market, sig) {
-    let ob;
-    try { ob = await this.kalshi.getOrderbook(market.ticker); } catch(e) { return null; }
+    // Use market-level pricing first (no extra API call needed)
+    let yesAsk = market.yes_ask || null;
+    let noAsk = market.no_ask || null;
 
-    const yesAsk = ob.yes?.length ? ob.yes[0][0] : null;
-    const noAsk = ob.no?.length ? ob.no[0][0] : null;
+    // Fallback to orderbook if market-level prices missing
+    if (!yesAsk && !noAsk) {
+      try {
+        const ob = await this.kalshi.getOrderbook(market.ticker);
+        const book = ob.orderbook || ob; // handle both formats
+        yesAsk = book.yes?.length ? book.yes[0][0] : null;
+        noAsk = book.no?.length ? book.no[0][0] : null;
+      } catch(e) { return null; }
+    }
     if (!yesAsk && !noAsk) return null;
 
     const dir = sig.direction;
@@ -172,10 +197,16 @@ class BTCScalper extends EventEmitter {
     const edge = modelProb - price / 100;
     const tw = this.correction.getCurrentTimeWindow();
     const adjEdge = this.correction.getAdjustedEdge(this.cfg.minEdge, { direction: dir, volRegime: vol, timeWindow: tw });
-    if (edge < adjEdge) return null;
+    if (edge < adjEdge) {
+      this._log('📊 Skip (low edge)', `${market.ticker} ${side} @ ${price}¢ | edge:${(edge*100).toFixed(1)}% < needed:${(adjEdge*100).toFixed(1)}% | model:${(modelProb*100).toFixed(0)}%`);
+      return null;
+    }
 
     const fee = 0.07 * (price / 100) * (1 - price / 100);
-    if (edge - fee <= 0) return null;
+    if (edge - fee <= 0) {
+      this._log('📊 Skip (fees eat edge)', `${market.ticker} edge:${(edge*100).toFixed(1)}% - fee:${(fee*100).toFixed(1)}% = net ${((edge-fee)*100).toFixed(1)}%`);
+      return null;
+    }
 
     return { ticker: market.ticker, title: market.title || market.ticker, side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3), modelProb: +modelProb.toFixed(2), direction: dir, volRegime: vol, timeWindow: tw, minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price };
   }
