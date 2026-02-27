@@ -110,13 +110,17 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow-x:h
     </div>
   </div>
 
-  <!-- BTC TICKER -->
+  <!-- BTC TICKER + TA INDICATORS -->
   <div class="ticker">
     <div class="btc" id="btcPrice">$—</div>
     <div id="btcSignal" class="signal" style="background:rgba(255,255,255,0.06);color:var(--dim)">—</div>
-    <div class="meta">Mom 1m: <span id="mom1m">—</span>% · 5m: <span id="mom5m">—</span>% · Vol: <span id="vol5m">—</span></div>
+    <div class="meta">RSI: <span id="taRsi">—</span> · MACD: <span id="taMacd">—</span> · BB%: <span id="taBb">—</span></div>
+    <div class="meta">VWAP: <span id="taVwap">—</span> · Score: <span id="taScore" style="font-weight:700">—</span></div>
     <div class="meta" style="margin-left:auto" id="btcSource">—</div>
   </div>
+
+  <!-- TA REASONS -->
+  <div id="taReasons" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;min-height:24px"></div>
 
   <!-- MAIN GRID -->
   <div class="grid">
@@ -212,22 +216,29 @@ function connect() {
 function update(s) {
   status = s;
 
-  // BTC
+  // BTC + TA
   if (s.btc) {
     const p = s.btc.price;
     document.getElementById('btcPrice').textContent = p ? `$${p.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '$—';
-    document.getElementById('btcSource').textContent = s.btc.source || '—';
-    if (s.btc.signals) {
-      const sig = s.btc.signals;
-      document.getElementById('mom1m').textContent = sig.momentum1m?.toFixed(3) || '—';
-      document.getElementById('mom5m').textContent = sig.momentum5m?.toFixed(3) || '—';
-      document.getElementById('vol5m').textContent = sig.volatility5m?.toFixed(4) || '—';
-      const sigEl = document.getElementById('btcSignal');
-      const dir = sig.direction || 'NEUTRAL';
-      sigEl.textContent = `${dir} (${sig.strength || 0})`;
-      sigEl.style.background = dir === 'UP' ? 'rgba(34,197,94,0.15)' : dir === 'DOWN' ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.06)';
-      sigEl.style.color = dir === 'UP' ? 'var(--green)' : dir === 'DOWN' ? 'var(--red)' : 'var(--dim)';
-    }
+    document.getElementById('btcSource').textContent = (s.btc.source || '—') + (s.btc.candles ? ` (${s.btc.candles} candles)` : '');
+    const sig = s.btc.signals || s.btc.signal || {};
+    const dir = sig.direction || 'NEUTRAL';
+    const sigEl = document.getElementById('btcSignal');
+    sigEl.textContent = `${dir} (${sig.confidence || sig.strength || 0})`;
+    sigEl.style.background = dir === 'UP' || dir === 'BUY' ? 'rgba(34,197,94,0.15)' : dir === 'DOWN' || dir === 'SELL' ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.06)';
+    sigEl.style.color = dir === 'UP' || dir === 'BUY' ? 'var(--green)' : dir === 'DOWN' || dir === 'SELL' ? 'var(--red)' : 'var(--dim)';
+
+    // TA indicators
+    const ind = s.btc.indicators || {};
+    const rsi = ind.rsi14 || sig.rsi; if (rsi != null) { const re = document.getElementById('taRsi'); re.textContent = (+rsi).toFixed(1); re.style.color = rsi > 70 ? 'var(--red)' : rsi < 30 ? 'var(--green)' : 'var(--text)'; }
+    const mh = ind.macdHist || sig.macdHist; if (mh != null) { const me = document.getElementById('taMacd'); me.textContent = (+mh).toFixed(1); me.style.color = mh > 0 ? 'var(--green)' : 'var(--red)'; }
+    const bb = ind.bbPctB || sig.bbPctB; if (bb != null) { document.getElementById('taBb').textContent = (+bb*100).toFixed(0) + '%'; }
+    const vd = sig.vwapDelta; if (vd != null) { const ve = document.getElementById('taVwap'); ve.textContent = (vd > 0 ? '+' : '') + (+vd).toFixed(3) + '%'; ve.style.color = vd > 0 ? 'var(--green)' : 'var(--red)'; }
+    const sc = sig.score || sig.strength; if (sc != null) { const se = document.getElementById('taScore'); se.textContent = (sc > 0 ? '+' : '') + sc; se.style.color = sc > 15 ? 'var(--green)' : sc < -15 ? 'var(--red)' : 'var(--dim)'; }
+
+    // TA reasons
+    const reasons = sig.reasons || (s.btc.signal || {}).reasons || [];
+    document.getElementById('taReasons').innerHTML = reasons.map(r => `<span style="font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:var(--dim)">${r}</span>`).join('');
   }
 
   // Countdown
