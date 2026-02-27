@@ -15,11 +15,20 @@ app.use(express.json());
 const bot = new BTCScalper();
 
 // API
-app.get('/api/status', (req, res) => res.json(bot.getStatus()));
-app.get('/api/correction', (req, res) => res.json(bot.correction.getStatus()));
-app.post('/api/start', async (req, res) => { await bot.start(); res.json({ ok: true }); });
-app.post('/api/stop', (req, res) => { bot.stop(); res.json({ ok: true }); });
-app.post('/api/pause', (req, res) => { bot.paused = !bot.paused; res.json({ paused: bot.paused }); });
+app.get('/api/status', (req, res) => { try { res.json(bot.getStatus()); } catch(e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/correction', (req, res) => { try { res.json(bot.correction.getStatus()); } catch(e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/start', async (req, res) => {
+  try { await bot.start(); res.json({ ok: true, running: bot.running }); }
+  catch(e) { console.error('[SERVER] Start failed:', e); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/stop', (req, res) => {
+  try { bot.stop(); res.json({ ok: true }); }
+  catch(e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/pause', (req, res) => {
+  try { bot.paused = !bot.paused; res.json({ paused: bot.paused }); }
+  catch(e) { res.status(500).json({ ok: false, error: e.message }); }
+});
 
 // WebSocket
 const broadcast = (data) => { const msg = JSON.stringify(data); wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(msg); }); };
