@@ -16,8 +16,8 @@ class BTCScalper extends EventEmitter {
       hours: cfg.hours || +process.env.TIME_LIMIT_HOURS || 48,
       scanMs: cfg.scanMs || +process.env.SCAN_INTERVAL_MS || 25000,
       priceMs: cfg.priceMs || +process.env.PRICE_POLL_MS || 15000,
-      maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.25,
-      minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.04,
+      maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.15,
+      minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.06,
       maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 3,
       dryRun: process.env.DRY_RUN === 'true',
     };
@@ -173,36 +173,54 @@ class BTCScalper extends EventEmitter {
     const minsLeft = (exp - Date.now()) / 60000;
     const taScore = sig.score || 0;
     const taConf = sig.confidence || 0;
+    const reasons = sig.reasons || [];
 
     if (this.correction.shouldAvoidDirection(dir)) return null;
 
+    // ══════════════════════════════════════════════
+    //  STRICT ENTRY GATES — must pass ALL of these
+    // ══════════════════════════════════════════════
+
+    // Gate 1: Minimum TA score — need multiple indicators agreeing
+    if (Math.abs(taScore) < 25) {
+      this._log('🚫 Weak signal', `${market.ticker} score=${taScore} (need ±25)`);
+      return null;
+    }
+
+    // Gate 2: Minimum confidence
+    if (taConf < 25) return null;
+
+    // Gate 3: Need at least 3 confirming reasons
+    if (reasons.length < 3) {
+      this._log('🚫 Too few confirmations', `${market.ticker} only ${reasons.length} reasons`);
+      return null;
+    }
+
+    // Gate 4: No betting on NEUTRAL — only clear BUY or SELL
+    if (dir === 'NEUTRAL') return null;
+
+    // Gate 5: RSI must not contradict direction
+    if (dir === 'UP' && sig.rsi > 75) { this._log('🚫 RSI too hot to buy', `RSI=${sig.rsi?.toFixed(0)}`); return null; }
+    if (dir === 'DOWN' && sig.rsi < 25) { this._log('🚫 RSI too cold to sell', `RSI=${sig.rsi?.toFixed(0)}`); return null; }
+
+    // Gate 6: MACD must agree with direction
+    if (dir === 'UP' && sig.macdHist < 0) { this._log('🚫 MACD disagrees with BUY', `hist=${sig.macdHist?.toFixed(2)}`); return null; }
+    if (dir === 'DOWN' && sig.macdHist > 0) { this._log('🚫 MACD disagrees with SELL', `hist=${sig.macdHist?.toFixed(2)}`); return null; }
+
     let side, price, modelProb;
 
-    // Use TA score + confidence for probability estimate
-    // Score ranges -100 to +100, confidence 0-100
     if (dir === 'UP' && yesAsk) {
       side = 'yes'; price = yesAsk;
-      // Base: 50% + scaled score (max ±20%) + confidence boost
-      modelProb = 0.50 + (taScore / 500) + (taConf / 500);
-      // Strong trend boost
-      if (sig.trend === 'STRONG_UP' && taConf >= 40) modelProb = Math.min(0.93, modelProb + 0.08);
-      // Near-expiry with strong momentum = higher confidence
-      if (minsLeft < 8 && sig.momentum1m > 0.03 && taConf >= 30) modelProb = Math.min(0.95, modelProb + 0.06);
-      // RSI confirmation
-      if (sig.rsi > 55 && sig.rsi < 72) modelProb = Math.min(0.95, modelProb + 0.03);
+      // Conservative probability: base 52% + scaled TA score
+      modelProb = 0.52 + (taScore / 600) + (taConf / 800);
+      if (sig.trend === 'STRONG_UP' && taConf >= 45) modelProb = Math.min(0.90, modelProb + 0.06);
+      if (minsLeft < 6 && sig.momentum1m > 0.04 && taConf >= 35) modelProb = Math.min(0.90, modelProb + 0.04);
     } else if (dir === 'DOWN' && noAsk) {
       side = 'no'; price = noAsk;
-      modelProb = 0.50 + (Math.abs(taScore) / 500) + (taConf / 500);
-      if (sig.trend === 'STRONG_DOWN' && taConf >= 40) modelProb = Math.min(0.93, modelProb + 0.08);
-      if (minsLeft < 8 && sig.momentum1m < -0.03 && taConf >= 30) modelProb = Math.min(0.95, modelProb + 0.06);
-      if (sig.rsi < 45 && sig.rsi > 28) modelProb = Math.min(0.95, modelProb + 0.03);
-    } else {
-      // Neutral: only bet if we have a clear price advantage (cheap side)
-      if (yesAsk && noAsk && Math.min(yesAsk, noAsk) < 40) {
-        side = yesAsk <= noAsk ? 'yes' : 'no'; price = Math.min(yesAsk, noAsk);
-        modelProb = 0.52;
-      } else return null; // skip neutral without clear edge
-    }
+      modelProb = 0.52 + (Math.abs(taScore) / 600) + (taConf / 800);
+      if (sig.trend === 'STRONG_DOWN' && taConf >= 45) modelProb = Math.min(0.90, modelProb + 0.06);
+      if (minsLeft < 6 && sig.momentum1m < -0.04 && taConf >= 35) modelProb = Math.min(0.90, modelProb + 0.04);
+    } else return null;
 
     if (!price || price < 3 || price > 97) return null;
 
@@ -227,12 +245,12 @@ class BTCScalper extends EventEmitter {
   async _place(opp) {
     const sizeMult = this.correction.getSizeMultiplier();
     let maxBet = this.bankroll * this.cfg.maxBetPct * sizeMult;
-    maxBet = Math.max(1, Math.min(maxBet, this.bankroll * 0.5));
+    maxBet = Math.max(1, Math.min(maxBet, this.bankroll * 0.30));
     const contracts = Math.max(1, Math.floor((maxBet * 100) / opp.price));
     const cost = (contracts * opp.price) / 100;
-    if (cost > this.bankroll * 0.6) return;
+    if (cost > this.bankroll * 0.35) return;
 
-    this._log('🎯 BET', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} | edge:${(opp.edge*100).toFixed(1)}% | ${opp.direction} | ${opp.minsLeft}min`);
+    this._log('🎯 BET', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} | edge:${(opp.edge*100).toFixed(1)}% | TA:${opp.ta?.score}/${opp.ta?.conf} | RSI:${opp.ta?.rsi} MACD:${opp.ta?.macd} | ${opp.minsLeft}min`);
 
     if (this.cfg.dryRun) {
       const id = 'dry-' + uuidv4().slice(0,8);
