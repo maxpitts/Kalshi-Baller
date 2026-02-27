@@ -259,21 +259,50 @@ class BTCScalper extends EventEmitter {
       try {
         const r = await this.kalshi.getMarket(order.ticker);
         const m = r.market || r;
-        if (m.status === 'settled' || m.result) {
-          const won = m.result === order.side;
+
+        // Kalshi lifecycle: active → closed → determined → settled
+        const isResolved = m.status === 'settled' || m.status === 'determined' || m.status === 'closed';
+        const result = m.result; // 'yes' or 'no' or null
+
+        if (isResolved && result) {
+          const won = result === order.side;
           const pnl = won ? ((100 - order.price) * order.contracts / 100) : -(order.price * order.contracts / 100);
 
           this.correction.recordOutcome({ ticker: order.ticker, side: order.side, buyPrice: order.price, contracts: order.contracts, won, pnl, direction: order.direction, volRegime: order.volRegime });
 
-          if (won) { this.totalWins++; this._log('🎉 WIN', `${order.ticker} → ${m.result} | +$${pnl.toFixed(2)}`); }
-          else { this.totalLosses++; this._log('💀 LOSS', `${order.ticker} → ${m.result} | -$${Math.abs(pnl).toFixed(2)}`); }
+          if (won) { this.totalWins++; this._log('🎉 WIN', `${order.ticker} → ${result} (we had ${order.side}) | +$${pnl.toFixed(2)}`); }
+          else { this.totalLosses++; this._log('💀 LOSS', `${order.ticker} → ${result} (we had ${order.side}) | -$${Math.abs(pnl).toFixed(2)}`); }
 
-          this.bets.push({ ...order, result: m.result, won, pnl: +pnl.toFixed(2), resolvedAt: new Date().toISOString() });
+          this.bets.push({ ...order, result, won, pnl: +pnl.toFixed(2), resolvedAt: new Date().toISOString() });
           this.activeOrders.delete(id); this.activeTickers.delete(order.ticker);
+        } else if (isResolved && !result) {
+          // Market closed/determined but no result yet — check again next cycle
+          this._log('⏳ Awaiting result', `${order.ticker} status=${m.status} result=${result}`);
         }
       } catch(e) {
-        if (e.message?.includes('404')) { this.activeOrders.delete(id); this.activeTickers.delete(order.ticker); }
+        // 404 = market gone, remove
+        if (e.message?.includes('404') || e.message?.includes('not found')) {
+          this._log('⚠️ Market gone', `${order.ticker} — removing from tracking`);
+          this.activeOrders.delete(id); this.activeTickers.delete(order.ticker);
+        } else {
+          this._log('⚠️ Resolution check error', `${order.ticker}: ${e.message}`);
+        }
       }
+    }
+
+    // Also check via settlements/fills for any we might have missed
+    if (this.activeOrders.size > 0) {
+      try {
+        const fills = await this.kalshi.getFills({ limit: 50 });
+        const fillList = fills.fills || [];
+        for (const [id, order] of this.activeOrders.entries()) {
+          const settled = fillList.find(f => f.ticker === order.ticker && f.type === 'settlement');
+          if (settled) {
+            const won = settled.side === order.side && settled.is_taker !== undefined; // settlement fills
+            this._log('📋 Found settlement fill', `${order.ticker} via fills API`);
+          }
+        }
+      } catch(e) { /* fills check is supplementary */ }
     }
   }
 
