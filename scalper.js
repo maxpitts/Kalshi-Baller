@@ -83,7 +83,9 @@ class BTCScalper extends EventEmitter {
       if (!sig.price) { this._log('⚠️ No BTC price'); return; }
 
       // Heartbeat — always show what TA sees
-      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | TA:${sig.score>0?'+':''}${sig.score} (${sig.direction}) | RSI:${sig.rsi?.toFixed(0)} MACD:${sig.macdHist?.toFixed(1)} BB:${(sig.bbPctB*100)?.toFixed(0)}% | ${sig.regime}`);
+      const candleInfo = this.feed.candles?.length || 0;
+      const src = this.feed.candleSource || this.feed.source || '?';
+      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | TA:${sig.score>0?'+':''}${sig.score} (${sig.direction}) | RSI:${sig.rsi?.toFixed(0)} MACD:${sig.macdHist?.toFixed(1)} BB:${(sig.bbPctB*100)?.toFixed(0)}% | ${candleInfo} candles [${src}]`);
 
       await this._findAndBet(sig);
       this.emit('status', this.getStatus());
