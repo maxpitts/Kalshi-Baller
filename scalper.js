@@ -171,25 +171,37 @@ class BTCScalper extends EventEmitter {
     const vol = sig.volatility5m > 0.15 ? 'high' : sig.volatility5m > 0.05 ? 'medium' : 'low';
     const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
     const minsLeft = (exp - Date.now()) / 60000;
+    const taScore = sig.score || 0;
+    const taConf = sig.confidence || 0;
 
     if (this.correction.shouldAvoidDirection(dir)) return null;
 
     let side, price, modelProb;
+
+    // Use TA score + confidence for probability estimate
+    // Score ranges -100 to +100, confidence 0-100
     if (dir === 'UP' && yesAsk) {
       side = 'yes'; price = yesAsk;
-      modelProb = 0.50 + sig.strength / 200;
-      if (sig.trend === 'STRONG_UP') modelProb = Math.min(0.93, modelProb + 0.12);
-      if (minsLeft < 8 && sig.momentum1m > 0.05) modelProb = Math.min(0.95, modelProb + 0.08);
+      // Base: 50% + scaled score (max ±20%) + confidence boost
+      modelProb = 0.50 + (taScore / 500) + (taConf / 500);
+      // Strong trend boost
+      if (sig.trend === 'STRONG_UP' && taConf >= 40) modelProb = Math.min(0.93, modelProb + 0.08);
+      // Near-expiry with strong momentum = higher confidence
+      if (minsLeft < 8 && sig.momentum1m > 0.03 && taConf >= 30) modelProb = Math.min(0.95, modelProb + 0.06);
+      // RSI confirmation
+      if (sig.rsi > 55 && sig.rsi < 72) modelProb = Math.min(0.95, modelProb + 0.03);
     } else if (dir === 'DOWN' && noAsk) {
       side = 'no'; price = noAsk;
-      modelProb = 0.50 + sig.strength / 200;
-      if (sig.trend === 'STRONG_DOWN') modelProb = Math.min(0.93, modelProb + 0.12);
-      if (minsLeft < 8 && sig.momentum1m < -0.05) modelProb = Math.min(0.95, modelProb + 0.08);
+      modelProb = 0.50 + (Math.abs(taScore) / 500) + (taConf / 500);
+      if (sig.trend === 'STRONG_DOWN' && taConf >= 40) modelProb = Math.min(0.93, modelProb + 0.08);
+      if (minsLeft < 8 && sig.momentum1m < -0.03 && taConf >= 30) modelProb = Math.min(0.95, modelProb + 0.06);
+      if (sig.rsi < 45 && sig.rsi > 28) modelProb = Math.min(0.95, modelProb + 0.03);
     } else {
-      // Neutral: buy cheaper side
-      if (yesAsk && noAsk) { side = yesAsk <= noAsk ? 'yes' : 'no'; price = Math.min(yesAsk, noAsk); }
-      else { side = yesAsk ? 'yes' : 'no'; price = yesAsk || noAsk; }
-      modelProb = 0.52;
+      // Neutral: only bet if we have a clear price advantage (cheap side)
+      if (yesAsk && noAsk && Math.min(yesAsk, noAsk) < 40) {
+        side = yesAsk <= noAsk ? 'yes' : 'no'; price = Math.min(yesAsk, noAsk);
+        modelProb = 0.52;
+      } else return null; // skip neutral without clear edge
     }
 
     if (!price || price < 3 || price > 97) return null;
@@ -208,7 +220,8 @@ class BTCScalper extends EventEmitter {
       return null;
     }
 
-    return { ticker: market.ticker, title: market.title || market.ticker, side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3), modelProb: +modelProb.toFixed(2), direction: dir, volRegime: vol, timeWindow: tw, minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price };
+    return { ticker: market.ticker, title: market.title || market.ticker, side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3), modelProb: +modelProb.toFixed(2), direction: dir, volRegime: vol, timeWindow: tw, minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
+      ta: { score: taScore, conf: taConf, rsi: +(sig.rsi||0).toFixed(1), macd: sig.macdHist ? +(sig.macdHist).toFixed(2) : 0, bbPctB: +(sig.bbPctB||0).toFixed(2), vwap: +(sig.vwapDelta||0).toFixed(3), regime: sig.regime, reasons: (sig.reasons||[]).slice(0,5) } };
   }
 
   async _place(opp) {
