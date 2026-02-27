@@ -1,0 +1,293 @@
+<!--
+  ╔═══════════════════════════════════════════════════════════════╗
+  ║  CORRECTION ENGINE DASHBOARD PANEL                            ║
+  ║                                                               ║
+  ║  Add this HTML block inside your existing index.html,         ║
+  ║  after the existing dashboard panels (stats/bets section).    ║
+  ║  Also add the JS at the bottom to handle WebSocket updates.   ║
+  ╚═══════════════════════════════════════════════════════════════╝
+-->
+
+<!-- ═══ PASTE THIS HTML SECTION INTO YOUR DASHBOARD ═══ -->
+
+<div class="correction-engine-panel" id="correctionPanel" style="
+  background: linear-gradient(135deg, rgba(15, 10, 25, 0.95), rgba(20, 15, 35, 0.95));
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  border-radius: 16px;
+  padding: 24px;
+  margin-top: 20px;
+  position: relative;
+  overflow: hidden;
+">
+  <!-- Background glow -->
+  <div style="position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%, rgba(168,85,247,0.05) 0%, transparent 50%);pointer-events:none;"></div>
+  
+  <!-- Header -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;position:relative;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="font-size:20px;">🧠</div>
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;color:#a855f7;letter-spacing:1px;">CORRECTION ENGINE</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px;">Self-correcting adaptive system</div>
+      </div>
+    </div>
+    <div id="correctionDirection" style="
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      background: rgba(168, 85, 247, 0.15);
+      color: #a855f7;
+      border: 1px solid rgba(168, 85, 247, 0.3);
+    ">LEARNING</div>
+  </div>
+
+  <!-- Core Metrics Row -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+    <!-- Edge Multiplier -->
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;text-align:center;">
+      <div style="font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Edge ×</div>
+      <div id="corrEdgeMult" style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f0f0f0;">1.00</div>
+      <div id="corrEdgeBar" style="height:3px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:8px;overflow:hidden;">
+        <div style="width:50%;height:100%;background:linear-gradient(90deg,#22c55e,#a855f7);border-radius:2px;transition:width 0.5s;"></div>
+      </div>
+    </div>
+    <!-- Size Multiplier -->
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;text-align:center;">
+      <div style="font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Size ×</div>
+      <div id="corrSizeMult" style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f0f0f0;">1.00</div>
+    </div>
+    <!-- Streak -->
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;text-align:center;">
+      <div style="font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Streak</div>
+      <div id="corrStreak" style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f0f0f0;">—</div>
+    </div>
+    <!-- Tier Split -->
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;text-align:center;">
+      <div style="font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Tier Split</div>
+      <div id="corrTierSplit" style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:#f0f0f0;">70/30</div>
+      <div style="display:flex;gap:2px;margin-top:6px;height:6px;border-radius:3px;overflow:hidden;">
+        <div id="corrTierCertain" style="flex:70;background:#22c55e;transition:flex 0.5s;border-radius:3px 0 0 3px;"></div>
+        <div id="corrTierLongshot" style="flex:30;background:#f59e0b;transition:flex 0.5s;border-radius:0 3px 3px 0;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Category Performance -->
+  <div style="margin-bottom:20px;">
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">Category Performance</div>
+    <div id="corrCategories" style="display:flex;flex-wrap:wrap;gap:8px;">
+      <div style="color:rgba(255,255,255,0.3);font-size:12px;font-style:italic;">Awaiting data...</div>
+    </div>
+  </div>
+
+  <!-- Time Windows + Expiry Grid -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+    <!-- Time Windows -->
+    <div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">Time Windows (ET)</div>
+      <div id="corrTimeWindows" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+        <div style="color:rgba(255,255,255,0.3);font-size:12px;font-style:italic;">Awaiting data...</div>
+      </div>
+    </div>
+    <!-- Expiry Buckets -->
+    <div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">Expiry Proximity</div>
+      <div id="corrExpiryBuckets" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+        <div style="color:rgba(255,255,255,0.3);font-size:12px;font-style:italic;">Awaiting data...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Price Tier Breakdown -->
+  <div style="margin-bottom:16px;">
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">Price Tier Win Rates</div>
+    <div id="corrTiers" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;"></div>
+  </div>
+
+  <!-- Recent Correction History -->
+  <div>
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">Recent Outcomes</div>
+    <div id="corrHistory" style="display:flex;gap:4px;flex-wrap:wrap;">
+      <div style="color:rgba(255,255,255,0.3);font-size:12px;font-style:italic;">No outcomes recorded yet</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══ PASTE THIS JAVASCRIPT INTO YOUR EXISTING <script> SECTION ═══ -->
+<!-- Add this INSIDE your existing script block, or as a new <script> tag -->
+
+<script>
+// ── CORRECTION ENGINE DASHBOARD UPDATER ──
+
+function updateCorrectionPanel(data) {
+  if (!data) return;
+
+  // Direction badge
+  const dirEl = document.getElementById('correctionDirection');
+  if (dirEl) {
+    dirEl.textContent = data.direction || 'LEARNING';
+    const colors = {
+      'LEARNING': { bg: 'rgba(168,85,247,0.15)', border: 'rgba(168,85,247,0.3)', text: '#a855f7' },
+      'TIGHTER': { bg: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.3)', text: '#ef4444' },
+      'NORMAL': { bg: 'rgba(34,197,94,0.15)', border: 'rgba(34,197,94,0.3)', text: '#22c55e' },
+      'LOOSER': { bg: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.3)', text: '#3b82f6' },
+    };
+    const c = colors[data.direction] || colors['LEARNING'];
+    dirEl.style.background = c.bg;
+    dirEl.style.borderColor = c.border;
+    dirEl.style.color = c.text;
+  }
+
+  // Edge multiplier
+  const edgeEl = document.getElementById('corrEdgeMult');
+  if (edgeEl) {
+    const v = data.edgeMultiplier || 1.0;
+    edgeEl.textContent = v.toFixed(2);
+    edgeEl.style.color = v > 1.1 ? '#ef4444' : v < 0.9 ? '#22c55e' : '#f0f0f0';
+  }
+
+  // Size multiplier
+  const sizeEl = document.getElementById('corrSizeMult');
+  if (sizeEl) {
+    const v = data.positionSizeMultiplier || 1.0;
+    sizeEl.textContent = v.toFixed(2);
+    sizeEl.style.color = v < 0.7 ? '#ef4444' : v > 1.1 ? '#22c55e' : '#f0f0f0';
+  }
+
+  // Streak
+  const streakEl = document.getElementById('corrStreak');
+  if (streakEl && data.streak) {
+    streakEl.textContent = data.streak.current || '—';
+  }
+
+  // Tier split
+  if (data.tierAllocation) {
+    const splitEl = document.getElementById('corrTierSplit');
+    const certBar = document.getElementById('corrTierCertain');
+    const longBar = document.getElementById('corrTierLongshot');
+    const certPct = Math.round((data.tierAllocation.certain || 0.7) * 100);
+    const longPct = 100 - certPct;
+    if (splitEl) splitEl.textContent = `${certPct}/${longPct}`;
+    if (certBar) certBar.style.flex = certPct;
+    if (longBar) longBar.style.flex = longPct;
+  }
+
+  // Categories
+  const catEl = document.getElementById('corrCategories');
+  if (catEl && data.categories && Object.keys(data.categories).length > 0) {
+    catEl.innerHTML = Object.entries(data.categories).map(([name, info]) => {
+      const wr = info.winRate >= 0 ? `${Math.round(info.winRate)}%` : '—';
+      const w = info.weight || 1.0;
+      const bgColor = info.skip ? 'rgba(239,68,68,0.15)' :
+                      w > 1.2 ? 'rgba(34,197,94,0.15)' :
+                      w < 0.7 ? 'rgba(239,68,68,0.1)' : 'rgba(255,255,255,0.05)';
+      const borderColor = info.skip ? 'rgba(239,68,68,0.3)' :
+                          w > 1.2 ? 'rgba(34,197,94,0.2)' :
+                          w < 0.7 ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.08)';
+      const textColor = info.skip ? '#ef4444' : w > 1.2 ? '#22c55e' : w < 0.7 ? '#f87171' : 'rgba(255,255,255,0.7)';
+      return `<div style="
+        background:${bgColor};border:1px solid ${borderColor};border-radius:8px;
+        padding:8px 12px;font-size:12px;display:flex;flex-direction:column;gap:2px;min-width:100px;
+      ">
+        <div style="font-weight:600;color:${textColor};font-size:11px;">${name}${info.skip ? ' ⛔' : ''}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="color:rgba(255,255,255,0.4);font-family:'JetBrains Mono',monospace;font-size:10px;">WR: ${wr}</span>
+          <span style="color:rgba(255,255,255,0.3);font-size:10px;">n=${info.samples}</span>
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:${textColor};">×${w.toFixed(2)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // Time windows
+  const timeEl = document.getElementById('corrTimeWindows');
+  if (timeEl && data.timeWindows) {
+    const labels = { morning: '☀️ 6-10a', midday: '🌤️ 10a-2p', afternoon: '🌅 2-6p', evening: '🌙 6p-12a' };
+    timeEl.innerHTML = Object.entries(data.timeWindows).map(([w, info]) => {
+      const wr = info.winRate >= 0 ? `${Math.round(info.winRate)}%` : '—';
+      const weight = info.weight || 1.0;
+      return `<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:8px;text-align:center;">
+        <div style="font-size:11px;margin-bottom:4px;">${labels[w] || w}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:${weight > 1.1 ? '#22c55e' : weight < 0.8 ? '#ef4444' : '#f0f0f0'};">${wr}</div>
+        <div style="font-size:9px;color:rgba(255,255,255,0.3);">×${weight.toFixed(2)} | n=${info.samples}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // Expiry buckets
+  const expEl = document.getElementById('corrExpiryBuckets');
+  if (expEl && data.expiryBuckets) {
+    const labels = { imminent: '⚡ <6h', soon: '🕐 6-24h', distant: '📅 24-48h' };
+    expEl.innerHTML = Object.entries(data.expiryBuckets).map(([b, info]) => {
+      const wr = info.winRate >= 0 ? `${Math.round(info.winRate)}%` : '—';
+      return `<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:8px;text-align:center;">
+        <div style="font-size:11px;margin-bottom:4px;">${labels[b] || b}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#f0f0f0;">${wr}</div>
+        <div style="font-size:9px;color:rgba(255,255,255,0.3);">n=${info.samples}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // Price tiers
+  const tierEl = document.getElementById('corrTiers');
+  if (tierEl && data.tiers) {
+    const labels = { certain: '🎯 75-97¢', moderate: '⚖️ 40-74¢', longshot: '🎲 3-39¢' };
+    const colors = { certain: '#22c55e', moderate: '#3b82f6', longshot: '#f59e0b' };
+    tierEl.innerHTML = Object.entries(data.tiers).map(([t, info]) => {
+      const wr = info.winRate >= 0 ? `${Math.round(info.winRate)}%` : '—';
+      return `<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:12px;text-align:center;">
+        <div style="font-size:11px;margin-bottom:6px;">${labels[t] || t}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:${colors[t] || '#f0f0f0'};">${wr}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:4px;">n=${info.samples}</div>
+        ${info.winRate >= 0 ? `<div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;margin-top:8px;overflow:hidden;">
+          <div style="width:${Math.min(info.winRate, 100)}%;height:100%;background:${colors[t]};border-radius:2px;transition:width 0.5s;"></div>
+        </div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  // Recent outcomes (win/loss dots)
+  const histEl = document.getElementById('corrHistory');
+  if (histEl && data.recentHistory && data.recentHistory.length > 0) {
+    histEl.innerHTML = data.recentHistory.map(h => {
+      const color = h.won ? '#22c55e' : '#ef4444';
+      const icon = h.won ? '✅' : '❌';
+      const pnlStr = h.pnl >= 0 ? `+$${h.pnl.toFixed(2)}` : `-$${Math.abs(h.pnl).toFixed(2)}`;
+      return `<div style="
+        background:${h.won ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)'};
+        border:1px solid ${h.won ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'};
+        border-radius:8px;padding:6px 10px;font-size:11px;display:inline-flex;align-items:center;gap:6px;
+      ">
+        <span>${icon}</span>
+        <span style="color:${color};font-family:'JetBrains Mono',monospace;font-weight:600;">${pnlStr}</span>
+        <span style="color:rgba(255,255,255,0.4);">${h.category}</span>
+        <span style="color:rgba(255,255,255,0.25);font-size:9px;">${h.priceTier}</span>
+      </div>`;
+    }).join('');
+  }
+}
+
+// ── Hook into your existing WebSocket handler ──
+// Add this inside your existing ws.onmessage handler:
+//
+//   if (msg.type === 'correction_update') {
+//     updateCorrectionPanel(msg.data);
+//   }
+//
+// Also call it when receiving regular status updates:
+//
+//   if (msg.correction) {
+//     updateCorrectionPanel(msg.correction);
+//   }
+//
+// To poll for initial data, add to your existing fetch calls:
+//
+//   fetch('/api/correction')
+//     .then(r => r.json())
+//     .then(data => updateCorrectionPanel(data))
+//     .catch(() => {});
+</script>
