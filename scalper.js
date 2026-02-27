@@ -17,7 +17,7 @@ class BTCScalper extends EventEmitter {
       scanMs: cfg.scanMs || +process.env.SCAN_INTERVAL_MS || 25000,
       priceMs: cfg.priceMs || +process.env.PRICE_POLL_MS || 15000,
       maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.15,
-      minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.06,
+      minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.05,
       maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 3,
       dryRun: process.env.DRY_RUN === 'true',
     };
@@ -31,7 +31,7 @@ class BTCScalper extends EventEmitter {
     this.activeOrders = new Map(); this.activeTickers = new Set(); this.processedFills = new Set();
     this.bets = []; this.log = [];
     this.totalBets = 0; this.totalWins = 0; this.totalLosses = 0; this.totalWagered = 0;
-    this._intervals = [];
+    this._intervals = []; this._cycleCount = 0;
 
     // Restore correction state
     try { if (fs.existsSync(CORR_FILE)) this.correction.restore(fs.readFileSync(CORR_FILE, 'utf8')); } catch(e){}
@@ -63,6 +63,7 @@ class BTCScalper extends EventEmitter {
 
   async _cycle() {
     if (!this.running || this.paused) return;
+    this._cycleCount++;
     try {
       const elapsed = (Date.now() - this.startTime) / 3600000;
       if (elapsed >= this.cfg.hours) { this._log('💀 TIME UP'); this.stop(); return; }
@@ -81,6 +82,9 @@ class BTCScalper extends EventEmitter {
       const sig = this.feed.getSignals();
       if (!sig.price) { this._log('⚠️ No BTC price'); return; }
 
+      // Heartbeat — always show what TA sees
+      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | TA:${sig.score>0?'+':''}${sig.score} (${sig.direction}) | RSI:${sig.rsi?.toFixed(0)} MACD:${sig.macdHist?.toFixed(1)} BB:${(sig.bbPctB*100)?.toFixed(0)}% | ${sig.regime}`);
+
       await this._findAndBet(sig);
       this.emit('status', this.getStatus());
     } catch(e) { this._log('❌ Error', e.message); }
@@ -92,7 +96,7 @@ class BTCScalper extends EventEmitter {
       // Try series_ticker first
       const r = await this.kalshi.getMarkets({ series_ticker: 'KXBTC15M', status: 'open', limit: 100 });
       markets = r.markets || [];
-      this._log('📡 API response', `series_ticker=KXBTC15M → ${markets.length} markets`);
+      if (this._cycleCount % 5 === 1) this._log('📡 Markets', `${markets.length} KXBTC15M open`);
     } catch(e) {
       this._log('⚠️ Series fetch failed', e.message);
     }
@@ -178,34 +182,29 @@ class BTCScalper extends EventEmitter {
     if (this.correction.shouldAvoidDirection(dir)) return null;
 
     // ══════════════════════════════════════════════
-    //  STRICT ENTRY GATES — must pass ALL of these
+    //  ENTRY GATES — must pass ALL of these
     // ══════════════════════════════════════════════
 
     // Gate 1: Minimum TA score — need multiple indicators agreeing
-    if (Math.abs(taScore) < 25) {
-      this._log('🚫 Weak signal', `${market.ticker} score=${taScore} (need ±25)`);
-      return null;
+    if (Math.abs(taScore) < 20) {
+      return null; // silent skip for very weak — too noisy to log every one
     }
 
     // Gate 2: Minimum confidence
-    if (taConf < 25) return null;
+    if (taConf < 20) return null;
 
     // Gate 3: Need at least 3 confirming reasons
     if (reasons.length < 3) {
-      this._log('🚫 Too few confirmations', `${market.ticker} only ${reasons.length} reasons`);
+      this._log('🚫 Few confirms', `${market.ticker} score=${taScore} but only ${reasons.length} reasons`);
       return null;
     }
 
     // Gate 4: No betting on NEUTRAL — only clear BUY or SELL
     if (dir === 'NEUTRAL') return null;
 
-    // Gate 5: RSI must not contradict direction
-    if (dir === 'UP' && sig.rsi > 75) { this._log('🚫 RSI too hot to buy', `RSI=${sig.rsi?.toFixed(0)}`); return null; }
-    if (dir === 'DOWN' && sig.rsi < 25) { this._log('🚫 RSI too cold to sell', `RSI=${sig.rsi?.toFixed(0)}`); return null; }
-
-    // Gate 6: MACD must agree with direction
-    if (dir === 'UP' && sig.macdHist < 0) { this._log('🚫 MACD disagrees with BUY', `hist=${sig.macdHist?.toFixed(2)}`); return null; }
-    if (dir === 'DOWN' && sig.macdHist > 0) { this._log('🚫 MACD disagrees with SELL', `hist=${sig.macdHist?.toFixed(2)}`); return null; }
+    // Gate 5: RSI must not be extreme against direction
+    if (dir === 'UP' && sig.rsi > 78) { this._log('🚫 RSI too hot', `${sig.rsi?.toFixed(0)}`); return null; }
+    if (dir === 'DOWN' && sig.rsi < 22) { this._log('🚫 RSI too cold', `${sig.rsi?.toFixed(0)}`); return null; }
 
     let side, price, modelProb;
 
