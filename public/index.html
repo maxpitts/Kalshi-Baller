@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -338,9 +339,27 @@ setInterval(() => {
   document.getElementById('countdown').innerHTML = `${String(h).padStart(2,'0')}<span class="colon">:</span>${String(m).padStart(2,'0')}<span class="colon">:</span>${String(s).padStart(2,'0')}`;
 }, 1000);
 
-function doStart() { fetch('/api/start', {method:'POST'}); }
-function doStop() { fetch('/api/stop', {method:'POST'}); }
-function doPause() { fetch('/api/pause', {method:'POST'}); }
+function doStart() {
+  document.querySelector('.btn.go').textContent = 'STARTING...';
+  fetch('/api/start', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { alert('Start failed: ' + d.error); document.querySelector('.btn.go').textContent = 'START'; }
+      else { document.querySelector('.btn.go').textContent = '● RUNNING'; fetch('/api/status').then(r=>r.json()).then(update); }
+    })
+    .catch(e => { alert('Start failed: ' + e.message); document.querySelector('.btn.go').textContent = 'START'; });
+}
+function doStop() {
+  fetch('/api/stop', {method:'POST'}).then(r=>r.json()).then(d => {
+    document.querySelector('.btn.go').textContent = 'START';
+    if (d.error) alert('Stop failed: ' + d.error);
+  }).catch(e => alert('Stop failed: ' + e.message));
+}
+function doPause() {
+  fetch('/api/pause', {method:'POST'}).then(r=>r.json()).then(d => {
+    alert(d.paused ? 'Bot PAUSED' : 'Bot RESUMED');
+  }).catch(e => alert('Pause failed: ' + e.message));
+}
 
 // Init
 connect();
