@@ -235,26 +235,29 @@ class BTCScalper extends EventEmitter {
     }
 
     // ── TIME-BASED TIERS ──
+    // LESSON LEARNED: 55-75¢ is NOT a favorite. It's a coin flip
+    // with a label. Entry at 72¢ went to 1¢. The market flips
+    // constantly in the first 10 minutes.
+    //
+    // ONLY trade when:
+    // 1. Price is HIGH (85¢+) = real conviction, not noise
+    // 2. Time is SHORT (<5 min) = less time for reversal
     //
     // Tier   | Time Left  | Buy Range | Logic
     // -------|------------|-----------|------
-    // EARLY  | 8-15 min   | 55-75¢    | Trend forming, cheap entry, TP via position mgr
-    // MID    | 5-8 min    | 65-82¢    | Trend confirmed
-    // LATE   | 2-5 min    | 75-90¢    | Trend established
-    // SNIPE  | 1-2 min    | 85-95¢    | Nearly decided
-    // LOCK   | 0.3-1 min  | 90-97¢    | All but certain
+    // LATE   | 3-5 min    | 85-92¢    | Strong conviction confirmed
+    // SNIPE  | 1-3 min    | 88-95¢    | Nearly decided
+    // LOCK   | 0.3-1 min  | 91-97¢    | All but certain
 
     let minPrice, maxPrice, tier;
-    if (minsLeft > 8) {
-      minPrice = 55; maxPrice = 75; tier = 'EARLY';
-    } else if (minsLeft > 5) {
-      minPrice = 65; maxPrice = 82; tier = 'MID';
-    } else if (minsLeft > 2) {
-      minPrice = 75; maxPrice = 90; tier = 'LATE';
+    if (minsLeft > 5) {
+      return null; // too early — "favorites" flip constantly
+    } else if (minsLeft > 3) {
+      minPrice = 85; maxPrice = 92; tier = 'LATE';
     } else if (minsLeft > 1) {
-      minPrice = 85; maxPrice = 95; tier = 'SNIPE';
+      minPrice = 88; maxPrice = 95; tier = 'SNIPE';
     } else {
-      minPrice = 90; maxPrice = 97; tier = 'LOCK';
+      minPrice = 91; maxPrice = 97; tier = 'LOCK';
     }
 
     if (favPrice < minPrice || favPrice > maxPrice) return null;
@@ -266,10 +269,8 @@ class BTCScalper extends EventEmitter {
 
     let timeBonus;
     if (minsLeft < 1)      timeBonus = 0.05;
-    else if (minsLeft < 2) timeBonus = 0.04;
-    else if (minsLeft < 5) timeBonus = 0.03;
-    else if (minsLeft < 8) timeBonus = 0.025;
-    else                   timeBonus = 0.02;
+    else if (minsLeft < 3) timeBonus = 0.04;
+    else                   timeBonus = 0.03;
 
     const trueProb = Math.min(0.98, favPrice / 100 + timeBonus);
 
@@ -287,8 +288,8 @@ class BTCScalper extends EventEmitter {
     const reason = `${tier} ${favSide.toUpperCase()}@${favPrice}¢ ${minsLeft.toFixed(1)}min pay:${favPayout}¢ trueP:${(trueProb*100).toFixed(0)}% EV:${ev.toFixed(1)}¢`;
     this._log('🔬 Found', `${market.ticker} ${reason}`);
 
-    // Sizing tier: early = bigger (more room for TP), late = micro
-    const isMicro = minsLeft < 3 || favPrice >= 85;
+    // All trades are micro-sized (1-2 contracts) — high frequency, small risk
+    const isMicro = true;
 
     return {
       ticker: market.ticker, title: market.title || market.ticker,
