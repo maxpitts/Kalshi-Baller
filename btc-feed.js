@@ -7,13 +7,15 @@ const fetch = require('node-fetch');
 
 class BTCTechnicalEngine {
   constructor() {
-    this.candles = [];       // 1-min candles [{o,h,l,c,v,t}]
+    this.candles = [];
     this.maxCandles = 200;
     this.currentPrice = null;
     this.lastUpdate = null;
     this.source = null;
     this.candleSource = null;
     this.fetchErrors = [];
+    this._failedSources = {};  // track which sources have failed recently
+    this._candleSourceFound = false; // once we find candles, stick with that source
 
     this.indicators = {
       price: 0, ema9: 0, ema21: 0, ema50: 0, sma20: 0,
@@ -35,14 +37,22 @@ class BTCTechnicalEngine {
   // ═══════════════════════════════════════
 
   async fetchCandles() {
-    // Try each candle source in order
+    // If we already know candle APIs are blocked, go straight to spot+synthetic
+    if (this._candleSourceFound === 'synthetic') {
+      return this._fetchSpotAndBuild();
+    }
+
     const sources = [
       { name: 'Binance', fn: () => this._binanceCandles() },
       { name: 'Binance.us', fn: () => this._binanceUsCandles() },
       { name: 'CoinGecko OHLC', fn: () => this._coingeckoOHLC() },
+      { name: 'Coinbase', fn: () => this._coinbaseCandles() },
     ];
 
     for (const src of sources) {
+      // Skip sources that failed in last 5 minutes
+      if (this._failedSources[src.name] && Date.now() - this._failedSources[src.name] < 300000) continue;
+
       try {
         const candles = await src.fn();
         if (candles && candles.length >= 10) {
@@ -51,23 +61,26 @@ class BTCTechnicalEngine {
           this.lastUpdate = Date.now();
           this.candleSource = src.name;
           this.source = src.name;
+          this._candleSourceFound = src.name;
           this._computeAll();
-          console.log(`[TA] ${src.name}: ${candles.length} candles, price $${this.currentPrice.toFixed(2)}`);
+          console.log(`[TA] ${src.name}: ${candles.length} candles, $${this.currentPrice.toFixed(2)}`);
           return this.currentPrice;
         }
       } catch (e) {
+        this._failedSources[src.name] = Date.now();
         this.fetchErrors.push(`${src.name}: ${e.message}`);
-        console.error(`[TA] ${src.name} failed:`, e.message);
+        if (this.fetchErrors.length > 10) this.fetchErrors.shift();
       }
     }
 
-    // All candle sources failed — use spot price with synthetic candles
-    console.log('[TA] All candle sources failed, using spot + synthetic');
+    // All candle sources failed — use spot + synthetic
+    this._candleSourceFound = 'synthetic';
+    console.log('[TA] All candle APIs failed, switching to synthetic candles permanently');
     return this._fetchSpotAndBuild();
   }
 
   async _binanceCandles() {
-    const r = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=200', { timeout: 8000 });
+    const r = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=200', { timeout: 3000 });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (d.code) throw new Error(d.msg || `API error ${d.code}`);
@@ -76,7 +89,7 @@ class BTCTechnicalEngine {
   }
 
   async _binanceUsCandles() {
-    const r = await fetch('https://api.binance.us/api/v3/klines?symbol=BTCUSD&interval=1m&limit=200', { timeout: 8000 });
+    const r = await fetch('https://api.binance.us/api/v3/klines?symbol=BTCUSD&interval=1m&limit=200', { timeout: 3000 });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (d.code) throw new Error(d.msg || `API error ${d.code}`);
@@ -85,12 +98,21 @@ class BTCTechnicalEngine {
   }
 
   async _coingeckoOHLC() {
-    // CoinGecko OHLC: 1-day range returns ~288 5-min candles (close enough)
-    const r = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days=1', { timeout: 8000 });
+    const r = await fetch('https://api.coingecko.com/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days=1', { timeout: 3000 });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (!Array.isArray(d) || d.length < 5) throw new Error(`Only ${d?.length} candles`);
     return d.map(k => ({ t: k[0], o: k[1], h: k[2], l: k[3], c: k[4], v: 0 }));
+  }
+
+  async _coinbaseCandles() {
+    // Coinbase Exchange public API — 60-second granularity
+    const r = await fetch('https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60', { timeout: 3000 });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (!Array.isArray(d) || d.length < 10) throw new Error(`Only ${d?.length} candles`);
+    // Coinbase format: [time, low, high, open, close, volume] — reversed time order
+    return d.reverse().map(k => ({ t: k[0] * 1000, o: k[3], h: k[2], l: k[1], c: k[4], v: k[5] }));
   }
 
   // ═══════════════════════════════════════
