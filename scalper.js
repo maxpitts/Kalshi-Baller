@@ -81,6 +81,7 @@ class BTCScalper extends EventEmitter {
       } catch(e){}
 
       await this._checkResolutions();
+      await this._managePositions();  // TP/SL early exits
       await this._cancelStale();
 
       if (this.activeOrders.size >= this.cfg.maxBets) { this.emit('status', this.getStatus()); return; }
@@ -344,6 +345,125 @@ class BTCScalper extends EventEmitter {
       this.activeTickers.add(opp.ticker); this.totalBets++; this.totalWagered += cost;
       this._log('✅ ORDER', `${id.slice(0,8)} $${cost.toFixed(2)} ${opp.side.toUpperCase()} ${opp.ticker}`);
     } catch(e) { this._log('❌ Order failed', e.message); }
+  }
+
+  // ════════════════════════════════════════════════
+  //  POSITION MANAGEMENT — TP / SL / TIME EXIT
+  //
+  //  Core logic: our edge is mean reversion to ~50¢.
+  //  Once the market corrects, holding is a coin flip.
+  //  Lock in profits early. Cut losers before expiry.
+  // ════════════════════════════════════════════════
+
+  async _managePositions() {
+    if (this.activeOrders.size === 0) return;
+
+    for (const [id, order] of this.activeOrders.entries()) {
+      // Skip dry run orders — can't sell them
+      if (id.startsWith('dry-')) continue;
+
+      try {
+        // Get current orderbook for this market
+        const ob = await this.kalshi.getOrderbook(order.ticker);
+        const book = ob.orderbook || ob;
+
+        // Current bid = what we could sell at right now
+        // If we own YES, the YES bid is our exit price
+        // If we own NO, the NO bid is our exit price
+        let currentBid = null;
+        if (order.side === 'yes' && book.yes?.length) {
+          // YES bids are sorted by price desc
+          currentBid = book.yes[book.yes.length - 1]?.[0] || book.yes[0]?.[0];
+          // Actually on Kalshi, to sell YES we look at YES bid side
+          // The orderbook format varies — try to get the best bid
+          currentBid = book.yes[0]?.[0]; // highest bid
+        } else if (order.side === 'no' && book.no?.length) {
+          currentBid = book.no[0]?.[0];
+        }
+
+        if (!currentBid) continue; // no liquidity to exit
+
+        const entry = order.price;
+        const pnlPerContract = currentBid - entry; // positive = profit
+        const pnlPct = (pnlPerContract / entry) * 100;
+        const totalPnl = (pnlPerContract * order.contracts) / 100;
+
+        // Time until expiry
+        const exp = new Date(order.minsLeft ? Date.now() + order.minsLeft * 60000 : 0);
+        const minsRemaining = order.minsLeft != null
+          ? order.minsLeft - ((Date.now() - new Date(order.at).getTime()) / 60000)
+          : 99;
+
+        let exitReason = null;
+
+        // ── TAKE PROFIT ──
+        // If bid is 6+¢ above entry, we've captured most of the edge → lock it in
+        if (pnlPerContract >= 6) {
+          exitReason = `TP +${pnlPerContract}¢/ct ($${totalPnl.toFixed(2)})`;
+        }
+
+        // ── STOP LOSS ──
+        // If bid drops 10+¢ below entry, cut the loss
+        if (pnlPerContract <= -10) {
+          exitReason = `SL ${pnlPerContract}¢/ct ($${totalPnl.toFixed(2)})`;
+        }
+
+        // ── TIME-BASED EXIT ──
+        // If <2 min left AND we're in any profit → sell to lock it in
+        // (holding through last 2 min is pure coin flip territory)
+        if (minsRemaining < 2 && pnlPerContract >= 2) {
+          exitReason = `TIME TP +${pnlPerContract}¢ <2min left`;
+        }
+
+        // ── MEAN REVERSION COMPLETE ──
+        // If we bought at 42¢ and bid is now 49-51¢, fair value reached → exit
+        if (pnlPerContract >= 3 && currentBid >= 47 && currentBid <= 53) {
+          exitReason = `FAIR VALUE reached (bid:${currentBid}¢)`;
+        }
+
+        if (!exitReason) continue;
+
+        // ── EXECUTE SELL ──
+        this._log('💰 EXIT', `${order.side.toUpperCase()} ${order.ticker} | ${exitReason} | entry:${entry}¢ now:${currentBid}¢`);
+
+        try {
+          await this.kalshi.placeOrder({
+            ticker: order.ticker, action: 'sell', side: order.side, type: 'limit',
+            count: order.contracts,
+            ...(order.side === 'yes' ? { yes_price: currentBid } : { no_price: currentBid }),
+            client_order_id: uuidv4(),
+          });
+
+          const won = pnlPerContract > 0;
+          if (won) {
+            this.totalWins++;
+            this.bankroll += totalPnl;
+            this.peak = Math.max(this.peak, this.bankroll);
+            this._streak = Math.max(0, this._streak) + 1;
+            this._log('🎉 EARLY WIN', `${order.ticker} +$${totalPnl.toFixed(2)} | bank:$${this.bankroll.toFixed(2)}`);
+          } else {
+            this.totalLosses++;
+            this.bankroll += totalPnl;
+            this._streak = Math.min(0, this._streak) - 1;
+            this._log('🛑 EARLY CUT', `${order.ticker} -$${Math.abs(totalPnl).toFixed(2)} | bank:$${this.bankroll.toFixed(2)}`);
+            if (this._streak <= -this._streakLimit) {
+              this._pausedUntil = Date.now() + this._cooldownMs;
+              this._log('🧊 CIRCUIT BREAKER', `${Math.abs(this._streak)} consecutive losses — pausing`);
+            }
+          }
+
+          this.bets.push({ ...order, result: won ? 'early_tp' : 'early_sl', won, pnl: +totalPnl.toFixed(2), exitPrice: currentBid, resolvedAt: new Date().toISOString() });
+          this.activeOrders.delete(id);
+          this.activeTickers.delete(order.ticker);
+        } catch(sellErr) {
+          this._log('⚠️ Sell failed', `${order.ticker}: ${sellErr.message}`);
+        }
+
+        await new Promise(r => setTimeout(r, 200)); // rate limit
+      } catch(e) {
+        // Orderbook fetch failed — skip this position, check next cycle
+      }
+    }
   }
 
   async _checkResolutions() {
