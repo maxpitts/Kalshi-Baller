@@ -14,11 +14,11 @@ class BTCScalper extends EventEmitter {
       startBankroll: cfg.startBankroll || +process.env.STARTING_BANKROLL || 100,
       target: cfg.target || +process.env.TARGET_BANKROLL || 10000,
       hours: cfg.hours || +process.env.TIME_LIMIT_HOURS || 48,
-      scanMs: cfg.scanMs || +process.env.SCAN_INTERVAL_MS || 25000,
+      scanMs: cfg.scanMs || +process.env.SCAN_INTERVAL_MS || 12000,
       priceMs: cfg.priceMs || +process.env.PRICE_POLL_MS || 15000,
       maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.10,
       minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.02,
-      maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 4,
+      maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 8,
       dryRun: process.env.DRY_RUN === 'true',
     };
 
@@ -111,76 +111,107 @@ class BTCScalper extends EventEmitter {
   async _findAndBet(sig) {
     let markets = [];
 
-    // Scan multiple crypto 15-min series
-    const series = ['KXBTC15M', 'KXETH15M', 'KXSOL15M'];
-    for (const ticker of series) {
+    // ── BROAD MARKET DISCOVERY ──
+    // Scan every short-term crypto series we can find
+    // Not just 15M — also 5M, 1H if they exist
+    const series = [
+      // 15-minute markets
+      'KXBTC15M', 'KXETH15M', 'KXSOL15M',
+      // 5-minute markets (if available)
+      'KXBTC5M', 'KXETH5M', 'KXSOL5M',
+      // Other potential series
+      'KXDOGE15M', 'KXADA15M', 'KXAVAX15M', 'KXLINK15M', 'KXMATIC15M',
+      'KXDOGE5M', 'KXBNB15M', 'KXXRP15M',
+    ];
+
+    // Batch fetch — skip unknown series silently
+    const fetches = series.map(async (ticker) => {
       try {
         const r = await this.kalshi.getMarkets({ series_ticker: ticker, status: 'open', limit: 50 });
-        const found = r.markets || [];
-        markets.push(...found);
-      } catch(e) {}
-    }
-    if (this._cycleCount % 5 === 1) this._log('📡 Markets', `${markets.length} across BTC/ETH/SOL`);
+        return r.markets || [];
+      } catch(e) { return []; }
+    });
+    const results = await Promise.all(fetches);
+    for (const batch of results) markets.push(...batch);
 
-    // Fallback: broad search
-    if (!markets.length) {
+    // Also do a broad sweep to discover markets we might not know about
+    if (this._cycleCount % 10 === 1) {
       try {
         const r = await this.kalshi.getMarkets({ status: 'open', limit: 1000 });
         const all = r.markets || [];
-        markets = all.filter(m => {
+        const crypto = all.filter(m => {
           const t = (m.ticker || '').toUpperCase();
           const title = (m.title || '').toLowerCase();
-          return (t.includes('15M') || title.includes('15 min')) &&
-                 (t.includes('BTC') || t.includes('ETH') || t.includes('SOL') ||
-                  title.includes('bitcoin') || title.includes('ethereum') || title.includes('solana'));
+          return (t.includes('5M') || t.includes('15M') || t.includes('10M') ||
+                  title.includes('5 min') || title.includes('10 min') || title.includes('15 min')) &&
+                 (title.includes('bitcoin') || title.includes('ethereum') || title.includes('solana') ||
+                  title.includes('crypto') || title.includes('doge') || title.includes('xrp') ||
+                  t.includes('BTC') || t.includes('ETH') || t.includes('SOL'));
         });
-        if (markets.length) this._log('📡 Fallback', `${markets.length} crypto 15m markets`);
-      } catch(e2) { this._log('❌ Market fetch failed', e2.message); return; }
+        // Add any we didn't already have
+        const existing = new Set(markets.map(m => m.ticker));
+        for (const m of crypto) {
+          if (!existing.has(m.ticker)) markets.push(m);
+        }
+        if (crypto.length > markets.length - crypto.length) {
+          this._log('🔍 Discovery', `Found ${crypto.length} extra markets from broad scan`);
+        }
+      } catch(e) {}
     }
 
-    if (!markets.length) { this._log('🔍 No crypto 15m markets'); return; }
+    // Deduplicate
+    const seen = new Set();
+    markets = markets.filter(m => {
+      if (seen.has(m.ticker)) return false;
+      seen.add(m.ticker); return true;
+    });
+
+    if (this._cycleCount % 5 === 1) this._log('📡 Markets', `${markets.length} total`);
+
+    if (!markets.length) { this._log('🔍 No markets'); return; }
 
     const now = Date.now();
 
-    // ── DIAGNOSTIC: log market prices every 3rd cycle ──
-    if (this._cycleCount % 3 === 0 && markets.length > 0) {
-      const samples = markets.slice(0, 3).map(m => {
-        const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time);
-        const mins = ((exp.getTime() - now) / 60000).toFixed(1);
-        return `${m.ticker} Y:${m.yes_ask||'?'}¢ N:${m.no_ask||'?'}¢ ${mins}min`;
+    // ── DIAGNOSTIC ──
+    if (this._cycleCount % 4 === 0 && markets.length > 0) {
+      const inWindow = markets.filter(m => {
+        const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
+        const mins = (exp - now) / 60000;
+        return mins >= 0.3 && mins <= 5;
       });
-      this._log('🔎 DIAG', samples.join(' | '));
+      if (inWindow.length > 0) {
+        const samples = inWindow.slice(0, 4).map(m => {
+          const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time);
+          const mins = ((exp.getTime() - now) / 60000).toFixed(1);
+          return `${m.ticker} Y:${m.yes_ask||'?'}¢ N:${m.no_ask||'?'}¢ ${mins}m`;
+        });
+        this._log('🔎 DIAG', samples.join(' | '));
+      }
     }
 
-    // ── UNIFIED SCAN: all markets from 0.3 to 15 min out ──
+    // ── FILTER: 0.3-5 min window ──
+    // Allow RE-ENTRY: don't filter by activeTickers anymore.
+    // Instead, track by ticker+tier to allow multiple entries at different tiers.
     const candidates = markets.filter(m => {
-      if (this.activeTickers.has(m.ticker)) return false;
       const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
       const mins = (exp - now) / 60000;
-      return mins >= 0.3 && mins <= 15;
+      return mins >= 0.3 && mins <= 5;
     });
 
-    if (!candidates.length) {
-      if (this._cycleCount % 4 === 0 && markets.length > 0) {
-        const sample = markets[0];
-        const exp = new Date(sample.close_time || sample.expiration_time || sample.expected_expiration_time);
-        this._log('🔍 All filtered', `${markets.length} markets, sample ${sample.ticker} ${((exp-now)/60000).toFixed(1)}min`);
-      }
-      return;
-    }
+    if (!candidates.length) return;
 
-    // Analyze all candidates with unified strategy
+    // Analyze ALL candidates (they're already filtered to 0.3-5 min)
     const scored = [];
-    for (const m of candidates.slice(0, 10)) {
+    for (const m of candidates.slice(0, 15)) {
       try {
         const a = await this._analyze(m, sig);
         if (a) scored.push(a);
-        await new Promise(r => setTimeout(r, 150));
-      } catch(e) { this._log('❌ Analyze error', `${m.ticker}: ${e.message}`); }
+        await new Promise(r => setTimeout(r, 100)); // faster between calls
+      } catch(e) {}
     }
 
-    if (!scored.length && this._cycleCount % 3 === 0) {
-      this._log('📊 No opps', `Scanned ${Math.min(candidates.length, 10)} markets`);
+    if (!scored.length && this._cycleCount % 4 === 0) {
+      this._log('📊 No opps', `Scanned ${Math.min(candidates.length, 15)} markets in window`);
     }
 
     // Sort by EV, take best opportunities
@@ -261,6 +292,20 @@ class BTCScalper extends EventEmitter {
     }
 
     if (favPrice < minPrice || favPrice > maxPrice) return null;
+
+    // ── DEDUP: don't stack same ticker+tier ──
+    // Allow re-entry at a DIFFERENT tier (e.g., LATE then SNIPE then LOCK)
+    // But don't buy the same ticker at the same tier twice
+    const tierKey = `${market.ticker}:${tier}`;
+    for (const [, order] of this.activeOrders) {
+      if (order.ticker === market.ticker && order.tier === tier) return null;
+    }
+    // Also limit to max 2 active positions on same ticker
+    let sameTickerCount = 0;
+    for (const [, order] of this.activeOrders) {
+      if (order.ticker === market.ticker) sameTickerCount++;
+    }
+    if (sameTickerCount >= 2) return null;
 
     // ── TRUE PROBABILITY MODEL ──
     // Market price is a good estimate, but close to expiry it
