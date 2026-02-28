@@ -179,23 +179,24 @@ class BTCScalper extends EventEmitter {
 
   async _analyze(market, sig) {
     // ══════════════════════════════════════════════════════════
-    //  VOLATILITY-BASED MISPRICING STRATEGY
+    //  MISPRICING STRATEGY v2 — RESPECT THE MARKET
     //
-    //  Core thesis: BTC 15-min markets are ~coin flips.
-    //  Fair value ≈ 50¢ with small drift adjustment.
-    //  When market deviates from fair → fade the extreme.
+    //  Lesson learned: when YES is 84¢ and NO is 16¢, the
+    //  market KNOWS BTC is trending. That's not mispricing.
+    //  Buying the 16¢ side is suicide.
     //
-    //  Edge sources:
-    //  1. Fade overbought: YES at 60+¢ → buy NO (market overestimates direction)
-    //  2. Fade oversold: NO at 60+¢ → buy YES
-    //  3. Buy cheap: either side under 40¢ against expensive opposite
-    //  4. Small momentum adjustment: if BTC trending, slight bias
+    //  Real edge exists ONLY in the uncertain middle (35-65¢).
+    //  When the market can't decide, small mispricings appear.
+    //
+    //  Rules:
+    //  1. ONLY trade when both sides are 30-70¢ (genuine uncertainty)
+    //  2. NEVER buy anything under 30¢ (cheap for a reason)
+    //  3. Buy the slightly cheaper side when spread exists
+    //  4. Use BTC momentum to pick the right side, not fight it
     // ══════════════════════════════════════════════════════════
 
     let yesAsk = market.yes_ask || null;
     let noAsk = market.no_ask || null;
-    const yesBid = market.yes_bid || null;
-    const noBid = market.no_bid || null;
 
     // Fallback to orderbook
     if (!yesAsk && !noAsk) {
@@ -208,66 +209,84 @@ class BTCScalper extends EventEmitter {
     }
     if (!yesAsk && !noAsk) return null;
 
-    // ── VIG/SPREAD CHECK ──
-    // If YES + NO asks > 105, the built-in vig eats our edge
-    if (yesAsk && noAsk && yesAsk + noAsk > 105) {
-      return null; // silent skip — too much vig
-    }
+    // ── HARD FILTER: only trade in the uncertain zone ──
+    // If either side is under 30¢, the market has strong conviction → skip
+    if (yesAsk && yesAsk < 30) return null;
+    if (noAsk && noAsk < 30) return null;
+    // If either side is over 70¢, same thing
+    if (yesAsk && yesAsk > 70) return null;
+    if (noAsk && noAsk > 70) return null;
+
+    // ── VIG CHECK ──
+    if (yesAsk && noAsk && yesAsk + noAsk > 105) return null;
 
     const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
     const minsLeft = (exp - Date.now()) / 60000;
 
-    // ── FAIR VALUE MODEL ──
-    // Base: 50/50 (15-min BTC is a coin flip)
-    // Momentum adjustment: slight bias based on recent price action
-    let fairYes = 50; // cents
+    // ── DETERMINE WHICH SIDE TO BUY ──
+    // Use market prices as INFORMATION, not something to fade.
+    // The cheaper side in the 30-70 range is likely the one with slight edge.
+    // Momentum confirms: if BTC trending up, lean YES. If down, lean NO.
 
-    // Small momentum bias (max ±5¢)
-    if (sig.price && sig.momentum5m) {
-      // If BTC is up 0.1% in last 5 min, slight YES bias
-      const momBias = Math.max(-5, Math.min(5, sig.momentum5m * 30));
-      fairYes += momBias;
-    }
-
-    // Time decay: as expiry approaches with strong trend, increase conviction slightly
-    if (minsLeft < 5 && sig.momentum1m) {
-      const nearBias = Math.max(-3, Math.min(3, sig.momentum1m * 50));
-      fairYes += nearBias;
-    }
-
-    const fairNo = 100 - fairYes;
-
-    // ── FIND MISPRICING ──
     let side = null, price = null, edge = 0, reason = '';
 
-    if (yesAsk && yesAsk < fairYes - 2) {
-      // YES is cheap relative to fair value → buy YES
-      side = 'yes'; price = yesAsk;
-      edge = (fairYes - yesAsk) / 100;
-      reason = `YES cheap: ${yesAsk}¢ vs fair ${fairYes.toFixed(0)}¢`;
-    } else if (noAsk && noAsk < fairNo - 2) {
-      // NO is cheap relative to fair value → buy NO
-      side = 'no'; price = noAsk;
-      edge = (fairNo - noAsk) / 100;
-      reason = `NO cheap: ${noAsk}¢ vs fair ${fairNo.toFixed(0)}¢`;
-    }
+    // Both sides available — buy the cheaper one if there's a spread
+    if (yesAsk && noAsk) {
+      const spread = Math.abs(yesAsk - noAsk);
+      const mid = (yesAsk + noAsk) / 2;
 
-    // FADE EXTREMES: if one side is priced > 60¢, buy the other side
-    if (!side) {
-      if (yesAsk && yesAsk > 60 && noAsk && noAsk < 45) {
-        side = 'no'; price = noAsk;
-        edge = (fairNo - noAsk) / 100;
-        reason = `FADE: YES@${yesAsk}¢ overpriced, buy NO@${noAsk}¢`;
-      } else if (noAsk && noAsk > 60 && yesAsk && yesAsk < 45) {
-        side = 'yes'; price = yesAsk;
-        edge = (fairYes - yesAsk) / 100;
-        reason = `FADE: NO@${noAsk}¢ overpriced, buy YES@${yesAsk}¢`;
+      // Need at least 4¢ spread to have any edge after fees
+      if (spread < 4) {
+        return null; // too tight, no edge
       }
+
+      // Momentum check: which way is BTC leaning?
+      const momUp = (sig.momentum5m || 0) > 0.02;    // BTC trending up
+      const momDown = (sig.momentum5m || 0) < -0.02;  // BTC trending down
+
+      if (yesAsk < noAsk) {
+        // YES is cheaper — market leans NO but not strongly
+        if (momDown && yesAsk < 40) {
+          // Momentum confirms NO side — don't buy YES against it
+          return null;
+        }
+        side = 'yes'; price = yesAsk;
+        // Edge: half the spread (conservative — we're buying the cheaper side, not predicting)
+        edge = (spread / 2) / 100;
+        reason = `YES cheaper: ${yesAsk}¢ vs NO ${noAsk}¢ (spread ${spread}¢)`;
+
+        // Momentum bonus: if BTC trending UP and we're buying YES, add conviction
+        if (momUp) {
+          edge += 0.02;
+          reason += ' +mom↑';
+        }
+      } else {
+        // NO is cheaper — market leans YES but not strongly
+        if (momUp && noAsk < 40) {
+          // Momentum confirms YES side — don't buy NO against it
+          return null;
+        }
+        side = 'no'; price = noAsk;
+        edge = (spread / 2) / 100;
+        reason = `NO cheaper: ${noAsk}¢ vs YES ${yesAsk}¢ (spread ${spread}¢)`;
+
+        if (momDown) {
+          edge += 0.02;
+          reason += ' +mom↓';
+        }
+      }
+    } else if (yesAsk && yesAsk >= 35 && yesAsk <= 48) {
+      // Only YES available and it's in the buy zone
+      side = 'yes'; price = yesAsk;
+      edge = (50 - yesAsk) / 100;
+      reason = `YES solo ${yesAsk}¢`;
+    } else if (noAsk && noAsk >= 35 && noAsk <= 48) {
+      side = 'no'; price = noAsk;
+      edge = (50 - noAsk) / 100;
+      reason = `NO solo ${noAsk}¢`;
     }
 
-    if (!side || !price || price < 3 || price > 97 || edge <= 0) {
-      // Log what we saw
-      this._log('📊 Pass', `${market.ticker} YES:${yesAsk}¢ NO:${noAsk}¢ fair:${fairYes.toFixed(0)}/${fairNo.toFixed(0)} | no mispricing`);
+    if (!side || !price || edge <= 0) {
       return null;
     }
 
@@ -277,8 +296,8 @@ class BTCScalper extends EventEmitter {
 
     this._log('🔬 Found', `${market.ticker} ${reason} | edge:${(edge*100).toFixed(1)}% fee:${(fee*100).toFixed(1)}% net:${(netEdge*100).toFixed(1)}%`);
 
+    // Need 2% net edge minimum
     if (netEdge < 0.02) {
-      this._log('📊 Skip (thin edge)', `net ${(netEdge*100).toFixed(1)}% < 2%`);
       return null;
     }
 
@@ -288,7 +307,7 @@ class BTCScalper extends EventEmitter {
     return {
       ticker: market.ticker, title: market.title || market.ticker,
       side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3),
-      modelProb: +(side === 'yes' ? fairYes/100 : fairNo/100).toFixed(2),
+      modelProb: +(edge + price/100).toFixed(2),
       direction: dir, volRegime: vol,
       timeWindow: this.correction.getCurrentTimeWindow(),
       minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
