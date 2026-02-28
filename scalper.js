@@ -148,8 +148,12 @@ class BTCScalper extends EventEmitter {
       try {
         const a = await this._analyze(m, sig);
         if (a) scored.push(a);
-        await new Promise(r => setTimeout(r, 200)); // rate limit courtesy
-      } catch(e){}
+        await new Promise(r => setTimeout(r, 200));
+      } catch(e) { this._log('❌ Analyze error', `${m.ticker}: ${e.message}`); }
+    }
+
+    if (!scored.length) {
+      this._log('📊 No opportunities', `Analyzed ${Math.min(candidates.length, 8)} markets, none passed`);
     }
 
     scored.sort((a, b) => b.edge - a.edge);
@@ -158,20 +162,21 @@ class BTCScalper extends EventEmitter {
   }
 
   async _analyze(market, sig) {
-    // Use market-level pricing first (no extra API call needed)
+    // Use market-level pricing first
     let yesAsk = market.yes_ask || null;
     let noAsk = market.no_ask || null;
 
-    // Fallback to orderbook if market-level prices missing
+    // Fallback to orderbook
     if (!yesAsk && !noAsk) {
       try {
         const ob = await this.kalshi.getOrderbook(market.ticker);
-        const book = ob.orderbook || ob; // handle both formats
+        const book = ob.orderbook || ob;
         yesAsk = book.yes?.length ? book.yes[0][0] : null;
         noAsk = book.no?.length ? book.no[0][0] : null;
-      } catch(e) { return null; }
+      } catch(e) { this._log('⚠️ OB fail', `${market.ticker}: ${e.message}`); return null; }
     }
-    if (!yesAsk && !noAsk) return null;
+
+    if (!yesAsk && !noAsk) { this._log('⚠️ No prices', market.ticker); return null; }
 
     const dir = sig.direction;
     const vol = sig.volatility5m > 0.15 ? 'high' : sig.volatility5m > 0.05 ? 'medium' : 'low';
@@ -181,65 +186,55 @@ class BTCScalper extends EventEmitter {
     const taConf = sig.confidence || 0;
     const reasons = sig.reasons || [];
 
-    if (this.correction.shouldAvoidDirection(dir)) return null;
+    // ══════════════════════════════════════
+    //  DIAGNOSTIC: log what we're seeing
+    // ══════════════════════════════════════
+    this._log('🔬 Analyze', `${market.ticker} | YES:${yesAsk}¢ NO:${noAsk}¢ | TA:${taScore} ${dir} | RSI:${sig.rsi?.toFixed(0)} MACD:${sig.macdHist?.toFixed(1)} | ${minsLeft.toFixed(0)}min left | ${reasons.length} reasons`);
 
-    // ══════════════════════════════════════════════
-    //  ENTRY GATES — must pass ALL of these
-    // ══════════════════════════════════════════════
-
-    // Gate 1: Minimum TA score — need multiple indicators agreeing
-    if (Math.abs(taScore) < 20) {
-      return null; // silent skip for very weak — too noisy to log every one
-    }
-
-    // Gate 2: Minimum confidence
-    if (taConf < 20) return null;
-
-    // Gate 3: Need at least 3 confirming reasons
-    if (reasons.length < 3) {
-      this._log('🚫 Few confirms', `${market.ticker} score=${taScore} but only ${reasons.length} reasons`);
-      return null;
-    }
-
-    // Gate 4: No betting on NEUTRAL — only clear BUY or SELL
-    if (dir === 'NEUTRAL') return null;
-
-    // Gate 5: RSI must not be extreme against direction
-    if (dir === 'UP' && sig.rsi > 78) { this._log('🚫 RSI too hot', `${sig.rsi?.toFixed(0)}`); return null; }
-    if (dir === 'DOWN' && sig.rsi < 22) { this._log('🚫 RSI too cold', `${sig.rsi?.toFixed(0)}`); return null; }
+    // ══════════════════════════════════════
+    //  DETERMINE SIDE + MODEL PROBABILITY
+    // ══════════════════════════════════════
 
     let side, price, modelProb;
 
     if (dir === 'UP' && yesAsk) {
       side = 'yes'; price = yesAsk;
-      // Conservative probability: base 52% + scaled TA score
-      modelProb = 0.52 + (taScore / 600) + (taConf / 800);
-      if (sig.trend === 'STRONG_UP' && taConf >= 45) modelProb = Math.min(0.90, modelProb + 0.06);
-      if (minsLeft < 6 && sig.momentum1m > 0.04 && taConf >= 35) modelProb = Math.min(0.90, modelProb + 0.04);
+      modelProb = 0.53 + (taScore / 400) + (taConf / 600);
+      if (sig.trend === 'STRONG_UP') modelProb += 0.06;
     } else if (dir === 'DOWN' && noAsk) {
       side = 'no'; price = noAsk;
-      modelProb = 0.52 + (Math.abs(taScore) / 600) + (taConf / 800);
-      if (sig.trend === 'STRONG_DOWN' && taConf >= 45) modelProb = Math.min(0.90, modelProb + 0.06);
-      if (minsLeft < 6 && sig.momentum1m < -0.04 && taConf >= 35) modelProb = Math.min(0.90, modelProb + 0.04);
-    } else return null;
+      modelProb = 0.53 + (Math.abs(taScore) / 400) + (taConf / 600);
+      if (sig.trend === 'STRONG_DOWN') modelProb += 0.06;
+    } else if (dir === 'NEUTRAL') {
+      // On NEUTRAL with enough candle data, pick cheaper side with small edge
+      if (this.feed.candles.length >= 15 && yesAsk && noAsk) {
+        side = yesAsk <= noAsk ? 'yes' : 'no';
+        price = Math.min(yesAsk, noAsk);
+        modelProb = 0.52;
+      } else {
+        return null; // genuinely no signal
+      }
+    } else {
+      return null;
+    }
 
+    modelProb = Math.min(0.92, modelProb);
     if (!price || price < 3 || price > 97) return null;
 
+    // ══════════════════════════════════════
+    //  EDGE CALCULATION
+    // ══════════════════════════════════════
+
     const edge = modelProb - price / 100;
-    const tw = this.correction.getCurrentTimeWindow();
-    const adjEdge = this.correction.getAdjustedEdge(this.cfg.minEdge, { direction: dir, volRegime: vol, timeWindow: tw });
-    if (edge < adjEdge) {
-      this._log('📊 Skip (low edge)', `${market.ticker} ${side} @ ${price}¢ | edge:${(edge*100).toFixed(1)}% < needed:${(adjEdge*100).toFixed(1)}% | model:${(modelProb*100).toFixed(0)}%`);
-      return null;
-    }
-
     const fee = 0.07 * (price / 100) * (1 - price / 100);
-    if (edge - fee <= 0) {
-      this._log('📊 Skip (fees eat edge)', `${market.ticker} edge:${(edge*100).toFixed(1)}% - fee:${(fee*100).toFixed(1)}% = net ${((edge-fee)*100).toFixed(1)}%`);
-      return null;
-    }
+    const netEdge = edge - fee;
+    const minReq = 0.02; // 2% net edge minimum (after fees)
 
-    return { ticker: market.ticker, title: market.title || market.ticker, side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3), modelProb: +modelProb.toFixed(2), direction: dir, volRegime: vol, timeWindow: tw, minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
+    this._log('📊 Edge', `${market.ticker} ${side}@${price}¢ | model:${(modelProb*100).toFixed(0)}% edge:${(edge*100).toFixed(1)}% fee:${(fee*100).toFixed(1)}% net:${(netEdge*100).toFixed(1)}% | need>${(minReq*100).toFixed(0)}%`);
+
+    if (netEdge < minReq) return null;
+
+    return { ticker: market.ticker, title: market.title || market.ticker, side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3), modelProb: +modelProb.toFixed(2), direction: dir, volRegime: vol, timeWindow: this.correction.getCurrentTimeWindow(), minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
       ta: { score: taScore, conf: taConf, rsi: +(sig.rsi||0).toFixed(1), macd: sig.macdHist ? +(sig.macdHist).toFixed(2) : 0, bbPctB: +(sig.bbPctB||0).toFixed(2), vwap: +(sig.vwapDelta||0).toFixed(3), regime: sig.regime, reasons: (sig.reasons||[]).slice(0,5) } };
   }
 
