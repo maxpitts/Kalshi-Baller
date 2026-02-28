@@ -16,9 +16,9 @@ class BTCScalper extends EventEmitter {
       hours: cfg.hours || +process.env.TIME_LIMIT_HOURS || 48,
       scanMs: cfg.scanMs || +process.env.SCAN_INTERVAL_MS || 25000,
       priceMs: cfg.priceMs || +process.env.PRICE_POLL_MS || 15000,
-      maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.15,
-      minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.05,
-      maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 3,
+      maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.10,
+      minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.02,
+      maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 4,
       dryRun: process.env.DRY_RUN === 'true',
     };
 
@@ -82,10 +82,11 @@ class BTCScalper extends EventEmitter {
       const sig = this.feed.getSignals();
       if (!sig.price) { this._log('⚠️ No BTC price'); return; }
 
-      // Heartbeat — always show what TA sees
+      // Heartbeat
       const candleInfo = this.feed.candles?.length || 0;
       const src = this.feed.candleSource || this.feed.source || '?';
-      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | TA:${sig.score>0?'+':''}${sig.score} (${sig.direction}) | RSI:${sig.rsi?.toFixed(0)} MACD:${sig.macdHist?.toFixed(1)} BB:${(sig.bbPctB*100)?.toFixed(0)}% | ${candleInfo} candles [${src}]`);
+      const mom = sig.momentum5m?.toFixed(3) || '0';
+      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | mom5m:${mom}% | ${candleInfo} candles [${src}] | bankroll:$${this.bankroll.toFixed(2)}`);
 
       await this._findAndBet(sig);
       this.emit('status', this.getStatus());
@@ -162,9 +163,24 @@ class BTCScalper extends EventEmitter {
   }
 
   async _analyze(market, sig) {
-    // Use market-level pricing first
+    // ══════════════════════════════════════════════════════════
+    //  VOLATILITY-BASED MISPRICING STRATEGY
+    //
+    //  Core thesis: BTC 15-min markets are ~coin flips.
+    //  Fair value ≈ 50¢ with small drift adjustment.
+    //  When market deviates from fair → fade the extreme.
+    //
+    //  Edge sources:
+    //  1. Fade overbought: YES at 60+¢ → buy NO (market overestimates direction)
+    //  2. Fade oversold: NO at 60+¢ → buy YES
+    //  3. Buy cheap: either side under 40¢ against expensive opposite
+    //  4. Small momentum adjustment: if BTC trending, slight bias
+    // ══════════════════════════════════════════════════════════
+
     let yesAsk = market.yes_ask || null;
     let noAsk = market.no_ask || null;
+    const yesBid = market.yes_bid || null;
+    const noBid = market.no_bid || null;
 
     // Fallback to orderbook
     if (!yesAsk && !noAsk) {
@@ -173,80 +189,101 @@ class BTCScalper extends EventEmitter {
         const book = ob.orderbook || ob;
         yesAsk = book.yes?.length ? book.yes[0][0] : null;
         noAsk = book.no?.length ? book.no[0][0] : null;
-      } catch(e) { this._log('⚠️ OB fail', `${market.ticker}: ${e.message}`); return null; }
+      } catch(e) { return null; }
     }
+    if (!yesAsk && !noAsk) return null;
 
-    if (!yesAsk && !noAsk) { this._log('⚠️ No prices', market.ticker); return null; }
-
-    const dir = sig.direction;
-    const vol = sig.volatility5m > 0.15 ? 'high' : sig.volatility5m > 0.05 ? 'medium' : 'low';
     const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
     const minsLeft = (exp - Date.now()) / 60000;
-    const taScore = sig.score || 0;
-    const taConf = sig.confidence || 0;
-    const reasons = sig.reasons || [];
 
-    // ══════════════════════════════════════
-    //  DIAGNOSTIC: log what we're seeing
-    // ══════════════════════════════════════
-    this._log('🔬 Analyze', `${market.ticker} | YES:${yesAsk}¢ NO:${noAsk}¢ | TA:${taScore} ${dir} | RSI:${sig.rsi?.toFixed(0)} MACD:${sig.macdHist?.toFixed(1)} | ${minsLeft.toFixed(0)}min left | ${reasons.length} reasons`);
+    // ── FAIR VALUE MODEL ──
+    // Base: 50/50 (15-min BTC is a coin flip)
+    // Momentum adjustment: slight bias based on recent price action
+    let fairYes = 50; // cents
 
-    // ══════════════════════════════════════
-    //  DETERMINE SIDE + MODEL PROBABILITY
-    // ══════════════════════════════════════
+    // Small momentum bias (max ±5¢)
+    if (sig.price && sig.momentum5m) {
+      // If BTC is up 0.1% in last 5 min, slight YES bias
+      const momBias = Math.max(-5, Math.min(5, sig.momentum5m * 30));
+      fairYes += momBias;
+    }
 
-    let side, price, modelProb;
+    // Time decay: as expiry approaches with strong trend, increase conviction slightly
+    if (minsLeft < 5 && sig.momentum1m) {
+      const nearBias = Math.max(-3, Math.min(3, sig.momentum1m * 50));
+      fairYes += nearBias;
+    }
 
-    if (dir === 'UP' && yesAsk) {
+    const fairNo = 100 - fairYes;
+
+    // ── FIND MISPRICING ──
+    let side = null, price = null, edge = 0, reason = '';
+
+    if (yesAsk && yesAsk < fairYes - 2) {
+      // YES is cheap relative to fair value → buy YES
       side = 'yes'; price = yesAsk;
-      modelProb = 0.53 + (taScore / 400) + (taConf / 600);
-      if (sig.trend === 'STRONG_UP') modelProb += 0.06;
-    } else if (dir === 'DOWN' && noAsk) {
+      edge = (fairYes - yesAsk) / 100;
+      reason = `YES cheap: ${yesAsk}¢ vs fair ${fairYes.toFixed(0)}¢`;
+    } else if (noAsk && noAsk < fairNo - 2) {
+      // NO is cheap relative to fair value → buy NO
       side = 'no'; price = noAsk;
-      modelProb = 0.53 + (Math.abs(taScore) / 400) + (taConf / 600);
-      if (sig.trend === 'STRONG_DOWN') modelProb += 0.06;
-    } else if (dir === 'NEUTRAL') {
-      // On NEUTRAL with enough candle data, pick cheaper side with small edge
-      if (this.feed.candles.length >= 15 && yesAsk && noAsk) {
-        side = yesAsk <= noAsk ? 'yes' : 'no';
-        price = Math.min(yesAsk, noAsk);
-        modelProb = 0.52;
-      } else {
-        return null; // genuinely no signal
+      edge = (fairNo - noAsk) / 100;
+      reason = `NO cheap: ${noAsk}¢ vs fair ${fairNo.toFixed(0)}¢`;
+    }
+
+    // FADE EXTREMES: if one side is priced > 60¢, buy the other side
+    if (!side) {
+      if (yesAsk && yesAsk > 60 && noAsk && noAsk < 45) {
+        side = 'no'; price = noAsk;
+        edge = (fairNo - noAsk) / 100;
+        reason = `FADE: YES@${yesAsk}¢ overpriced, buy NO@${noAsk}¢`;
+      } else if (noAsk && noAsk > 60 && yesAsk && yesAsk < 45) {
+        side = 'yes'; price = yesAsk;
+        edge = (fairYes - yesAsk) / 100;
+        reason = `FADE: NO@${noAsk}¢ overpriced, buy YES@${yesAsk}¢`;
       }
-    } else {
+    }
+
+    if (!side || !price || price < 3 || price > 97 || edge <= 0) {
+      // Log what we saw
+      this._log('📊 Pass', `${market.ticker} YES:${yesAsk}¢ NO:${noAsk}¢ fair:${fairYes.toFixed(0)}/${fairNo.toFixed(0)} | no mispricing`);
       return null;
     }
 
-    modelProb = Math.min(0.92, modelProb);
-    if (!price || price < 3 || price > 97) return null;
-
-    // ══════════════════════════════════════
-    //  EDGE CALCULATION
-    // ══════════════════════════════════════
-
-    const edge = modelProb - price / 100;
+    // Fee calculation
     const fee = 0.07 * (price / 100) * (1 - price / 100);
     const netEdge = edge - fee;
-    const minReq = 0.02; // 2% net edge minimum (after fees)
 
-    this._log('📊 Edge', `${market.ticker} ${side}@${price}¢ | model:${(modelProb*100).toFixed(0)}% edge:${(edge*100).toFixed(1)}% fee:${(fee*100).toFixed(1)}% net:${(netEdge*100).toFixed(1)}% | need>${(minReq*100).toFixed(0)}%`);
+    this._log('🔬 Found', `${market.ticker} ${reason} | edge:${(edge*100).toFixed(1)}% fee:${(fee*100).toFixed(1)}% net:${(netEdge*100).toFixed(1)}%`);
 
-    if (netEdge < minReq) return null;
+    if (netEdge < 0.02) {
+      this._log('📊 Skip (thin edge)', `net ${(netEdge*100).toFixed(1)}% < 2%`);
+      return null;
+    }
 
-    return { ticker: market.ticker, title: market.title || market.ticker, side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3), modelProb: +modelProb.toFixed(2), direction: dir, volRegime: vol, timeWindow: this.correction.getCurrentTimeWindow(), minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
-      ta: { score: taScore, conf: taConf, rsi: +(sig.rsi||0).toFixed(1), macd: sig.macdHist ? +(sig.macdHist).toFixed(2) : 0, bbPctB: +(sig.bbPctB||0).toFixed(2), vwap: +(sig.vwapDelta||0).toFixed(3), regime: sig.regime, reasons: (sig.reasons||[]).slice(0,5) } };
+    const dir = side === 'yes' ? 'UP' : 'DOWN';
+    const vol = sig.volatility5m > 0.15 ? 'high' : sig.volatility5m > 0.05 ? 'medium' : 'low';
+
+    return {
+      ticker: market.ticker, title: market.title || market.ticker,
+      side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3),
+      modelProb: +(side === 'yes' ? fairYes/100 : fairNo/100).toFixed(2),
+      direction: dir, volRegime: vol,
+      timeWindow: this.correction.getCurrentTimeWindow(),
+      minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
+      ta: { score: sig.score||0, conf: sig.confidence||0, rsi: +(sig.rsi||0).toFixed(1), macd: sig.macdHist ? +(sig.macdHist).toFixed(2) : 0, bbPctB: +(sig.bbPctB||0).toFixed(2), vwap: +(sig.vwapDelta||0).toFixed(3), regime: sig.regime, reasons: [reason] }
+    };
   }
 
   async _place(opp) {
     const sizeMult = this.correction.getSizeMultiplier();
     let maxBet = this.bankroll * this.cfg.maxBetPct * sizeMult;
-    maxBet = Math.max(1, Math.min(maxBet, this.bankroll * 0.30));
+    maxBet = Math.max(1, Math.min(maxBet, this.bankroll * 0.20));
     const contracts = Math.max(1, Math.floor((maxBet * 100) / opp.price));
     const cost = (contracts * opp.price) / 100;
-    if (cost > this.bankroll * 0.35) return;
+    if (cost > this.bankroll * 0.25) return;
 
-    this._log('🎯 BET', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} | edge:${(opp.edge*100).toFixed(1)}% | TA:${opp.ta?.score}/${opp.ta?.conf} | RSI:${opp.ta?.rsi} MACD:${opp.ta?.macd} | ${opp.minsLeft}min`);
+    this._log('🎯 BET', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} | net edge:${((opp.edge-opp.fee)*100).toFixed(1)}% | ${opp.ta?.reasons?.[0] || ''} | ${opp.minsLeft}min`);
 
     if (this.cfg.dryRun) {
       const id = 'dry-' + uuidv4().slice(0,8);
