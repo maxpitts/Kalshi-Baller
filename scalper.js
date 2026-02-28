@@ -247,13 +247,14 @@ class BTCScalper extends EventEmitter {
     }
     if (!yesAsk && !noAsk) return null;
 
-    // ── HARD FILTER: only trade in the uncertain zone ──
-    // If either side is under 30¢, the market has strong conviction → skip
-    if (yesAsk && yesAsk < 30) return null;
-    if (noAsk && noAsk < 30) return null;
-    // If either side is over 70¢, same thing
-    if (yesAsk && yesAsk > 70) return null;
-    if (noAsk && noAsk > 70) return null;
+    // ── HARD FILTER: avoid extreme conviction only ──
+    // Under 20¢ = market is very sure, don't fight it
+    // Over 80¢ = overpaying for a small payout
+    // The momentum protection below is the real guard, not this floor
+    if (yesAsk && yesAsk < 20) return null;
+    if (noAsk && noAsk < 20) return null;
+    if (yesAsk && yesAsk > 80) return null;
+    if (noAsk && noAsk > 80) return null;
 
     // ── VIG CHECK ──
     if (yesAsk && noAsk && yesAsk + noAsk > 105) return null;
@@ -289,8 +290,10 @@ class BTCScalper extends EventEmitter {
           return null;
         }
         side = 'yes'; price = yesAsk;
-        // Edge: half the spread (conservative — we're buying the cheaper side, not predicting)
-        edge = (spread / 2) / 100;
+        // Edge: conservative mean-reversion estimate
+        // The further from 50, the more the market "knows" — so edge shrinks
+        // At 45¢ → ~5% edge. At 30¢ → ~4% edge. At 25¢ → ~3.5% edge.
+        edge = Math.min(0.08, (spread / 2) / 100 * 0.4);
         reason = `YES cheaper: ${yesAsk}¢ vs NO ${noAsk}¢ (spread ${spread}¢)`;
 
         // Momentum bonus: if BTC trending UP and we're buying YES, add conviction
@@ -305,7 +308,7 @@ class BTCScalper extends EventEmitter {
           return null;
         }
         side = 'no'; price = noAsk;
-        edge = (spread / 2) / 100;
+        edge = Math.min(0.08, (spread / 2) / 100 * 0.4);
         reason = `NO cheaper: ${noAsk}¢ vs YES ${yesAsk}¢ (spread ${spread}¢)`;
 
         if (momDown) {
