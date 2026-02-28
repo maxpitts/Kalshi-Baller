@@ -358,6 +358,17 @@ class BTCScalper extends EventEmitter {
   async _managePositions() {
     if (this.activeOrders.size === 0) return;
 
+    // ── EMERGENCY DRAWDOWN EXIT ──
+    // If bankroll drops 60%+ from peak, close EVERYTHING
+    const drawdown = this.peak > 0 ? 1 - (this.bankroll / this.peak) : 0;
+    const emergencyExit = drawdown >= 0.60;
+    if (emergencyExit) {
+      this._log('🚨 EMERGENCY EXIT', `Drawdown ${(drawdown*100).toFixed(0)}% — closing all positions`);
+    }
+
+    // Tighter SL when in significant drawdown
+    const slThreshold = drawdown > 0.40 ? -6 : drawdown > 0.25 ? -8 : -10;
+
     for (const [id, order] of this.activeOrders.entries()) {
       // Skip dry run orders — can't sell them
       if (id.startsWith('dry-')) continue;
@@ -396,28 +407,33 @@ class BTCScalper extends EventEmitter {
 
         let exitReason = null;
 
+        // ── EMERGENCY: close everything at 60%+ drawdown ──
+        if (emergencyExit) {
+          exitReason = `🚨 EMERGENCY DD ${(drawdown*100).toFixed(0)}% — closing`;
+        }
+
         // ── TAKE PROFIT ──
         // If bid is 6+¢ above entry, we've captured most of the edge → lock it in
-        if (pnlPerContract >= 6) {
+        if (!exitReason && pnlPerContract >= 6) {
           exitReason = `TP +${pnlPerContract}¢/ct ($${totalPnl.toFixed(2)})`;
         }
 
-        // ── STOP LOSS ──
-        // If bid drops 10+¢ below entry, cut the loss
-        if (pnlPerContract <= -10) {
-          exitReason = `SL ${pnlPerContract}¢/ct ($${totalPnl.toFixed(2)})`;
+        // ── STOP LOSS (tighter when in drawdown) ──
+        // Normal: -10¢, 25%+ DD: -8¢, 40%+ DD: -6¢
+        if (!exitReason && pnlPerContract <= slThreshold) {
+          exitReason = `SL ${pnlPerContract}¢/ct ($${totalPnl.toFixed(2)}) [limit:${slThreshold}¢]`;
         }
 
         // ── TIME-BASED EXIT ──
         // If <2 min left AND we're in any profit → sell to lock it in
         // (holding through last 2 min is pure coin flip territory)
-        if (minsRemaining < 2 && pnlPerContract >= 2) {
+        if (!exitReason && minsRemaining < 2 && pnlPerContract >= 2) {
           exitReason = `TIME TP +${pnlPerContract}¢ <2min left`;
         }
 
         // ── MEAN REVERSION COMPLETE ──
         // If we bought at 42¢ and bid is now 49-51¢, fair value reached → exit
-        if (pnlPerContract >= 3 && currentBid >= 47 && currentBid <= 53) {
+        if (!exitReason && pnlPerContract >= 3 && currentBid >= 47 && currentBid <= 53) {
           exitReason = `FAIR VALUE reached (bid:${currentBid}¢)`;
         }
 
@@ -463,6 +479,12 @@ class BTCScalper extends EventEmitter {
       } catch(e) {
         // Orderbook fetch failed — skip this position, check next cycle
       }
+    }
+
+    // After emergency exit, pause for 30 min to prevent re-entering
+    if (emergencyExit && this.activeOrders.size === 0) {
+      this._pausedUntil = Date.now() + (30 * 60000);
+      this._log('🚨 EMERGENCY PAUSE', `All positions closed. Pausing 30min to protect remaining bankroll $${this.bankroll.toFixed(2)}`);
     }
   }
 
