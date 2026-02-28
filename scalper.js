@@ -32,6 +32,7 @@ class BTCScalper extends EventEmitter {
     this.bets = []; this.log = [];
     this.totalBets = 0; this.totalWins = 0; this.totalLosses = 0; this.totalWagered = 0;
     this._intervals = []; this._cycleCount = 0;
+    this._microBets = 0; this._microWins = 0;
 
     // Loss streak circuit breaker
     this._streak = 0;            // negative = consecutive losses
@@ -138,15 +139,36 @@ class BTCScalper extends EventEmitter {
       } catch(e2) { this._log('❌ Market fetch failed', e2.message); return; }
     }
 
-    if (!markets.length) { this._log('🔍 No BTC 15m markets'); return; }
+    if (!markets.length) { this._log('🔍 No crypto 15m markets'); return; }
 
     const now = Date.now();
+
+    // ── MAIN STRATEGY: uncertain middle, 2-25 min out ──
     const candidates = markets.filter(m => {
       if (this.activeTickers.has(m.ticker)) return false;
       const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
       const mins = (exp - now) / 60000;
       return mins >= 2 && mins <= 25;
     });
+
+    // ── MICRO BETS: near-expiry sniping, 1-4 min out ──
+    const microCandidates = markets.filter(m => {
+      if (this.activeTickers.has(m.ticker)) return false;
+      const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
+      const mins = (exp - now) / 60000;
+      return mins >= 1 && mins <= 4;
+    });
+
+    // Run micro bets first (they're time-sensitive)
+    if (microCandidates.length > 0) {
+      for (const m of microCandidates.slice(0, 4)) {
+        try {
+          const micro = await this._analyzeMicro(m, sig);
+          if (micro) await this._placeMicro(micro);
+          await new Promise(r => setTimeout(r, 150));
+        } catch(e) {}
+      }
+    }
 
     if (!candidates.length) {
       // Log why we filtered everything
@@ -315,6 +337,118 @@ class BTCScalper extends EventEmitter {
     };
   }
 
+  // ════════════════════════════════════════════════
+  //  MICRO BETS — Near-Expiry Sniping
+  //
+  //  1-4 min from close, outcome is nearly decided.
+  //  Buy the heavy favorite side for 1-2 contracts.
+  //  High win rate, small profit per trade.
+  //
+  //  Key: ONLY buy the side momentum confirms.
+  //  We're not predicting — we're reading the scoreboard
+  //  late in the game and betting on the team that's winning.
+  // ════════════════════════════════════════════════
+
+  async _analyzeMicro(market, sig) {
+    let yesAsk = market.yes_ask || null;
+    let noAsk = market.no_ask || null;
+
+    if (!yesAsk && !noAsk) {
+      try {
+        const ob = await this.kalshi.getOrderbook(market.ticker);
+        const book = ob.orderbook || ob;
+        yesAsk = book.yes?.length ? book.yes[0][0] : null;
+        noAsk = book.no?.length ? book.no[0][0] : null;
+      } catch(e) { return null; }
+    }
+    if (!yesAsk || !noAsk) return null;
+
+    const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
+    const minsLeft = (exp - Date.now()) / 60000;
+    if (minsLeft < 0.5 || minsLeft > 4) return null; // too close or too far
+
+    // ── IDENTIFY THE FAVORITE ──
+    // We want the side priced 70-92¢ (strong favorite but not locked in)
+    // Below 70¢ = not enough conviction
+    // Above 92¢ = too expensive, risk/reward terrible
+
+    let side = null, price = null, payout = null, reason = '';
+
+    // Momentum must CONFIRM the favorite
+    const mom = sig.momentum5m || 0;
+    const momUp = mom > 0.01;
+    const momDown = mom < -0.01;
+
+    if (yesAsk >= 70 && yesAsk <= 92) {
+      // YES is favorite — only buy if BTC momentum is UP
+      if (!momUp) return null; // no momentum confirmation
+      side = 'yes'; price = yesAsk;
+      payout = 100 - yesAsk; // what we win per contract
+      reason = `MICRO YES@${yesAsk}¢ (payout:${payout}¢) mom↑`;
+    } else if (noAsk >= 70 && noAsk <= 92) {
+      // NO is favorite — only buy if BTC momentum is DOWN
+      if (!momDown) return null;
+      side = 'no'; price = noAsk;
+      payout = 100 - noAsk;
+      reason = `MICRO NO@${noAsk}¢ (payout:${payout}¢) mom↓`;
+    }
+
+    if (!side) return null;
+
+    // ── PAYOFF CHECK ──
+    // Need payout to justify the risk after fees
+    const fee = 0.07 * (price / 100) * (1 - price / 100);
+    const feeCents = fee * 100;
+    const netPayout = payout - feeCents;
+
+    // Need at least 5¢ net payout per contract to be worth it
+    if (netPayout < 5) return null;
+
+    // Win probability estimate: use market price as base, boost slightly for momentum confirmation
+    const impliedProb = price / 100;
+    const estWinRate = Math.min(0.95, impliedProb + 0.03); // 3% boost for momentum confirm
+
+    // Expected value check: (winRate × payout) - (lossRate × cost) > 0
+    const ev = (estWinRate * netPayout) - ((1 - estWinRate) * price);
+    if (ev <= 0) return null;
+
+    return {
+      ticker: market.ticker, side, price, payout, netPayout: +netPayout.toFixed(1),
+      fee: +feeCents.toFixed(1), ev: +ev.toFixed(1), minsLeft: +minsLeft.toFixed(1),
+      reason, isMicro: true
+    };
+  }
+
+  async _placeMicro(opp) {
+    // Micro bets: 1-2 contracts, max $1 risk
+    const maxRisk = Math.min(1.00, this.bankroll * 0.05); // 5% of bank or $1, whichever is less
+    const contracts = Math.max(1, Math.min(2, Math.floor((maxRisk * 100) / opp.price)));
+    const cost = (contracts * opp.price) / 100;
+
+    if (cost > this.bankroll * 0.08) return; // hard cap 8% on micros
+
+    this._log('🔸 MICRO', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} ($${cost.toFixed(2)}) | payout:${opp.netPayout}¢ EV:${opp.ev}¢ | ${opp.minsLeft}min | ${opp.reason}`);
+
+    if (this.cfg.dryRun) {
+      const id = 'micro-' + uuidv4().slice(0,8);
+      this.activeOrders.set(id, { ...opp, contracts, cost, id, at: new Date(), direction: opp.side === 'yes' ? 'UP' : 'DOWN', volRegime: 'micro' });
+      this.activeTickers.add(opp.ticker); this.totalBets++; this.totalWagered += cost;
+      this._log('🏜️ DRY MICRO', `$${cost.toFixed(2)}`); return;
+    }
+
+    try {
+      const res = await this.kalshi.placeOrder({
+        ticker: opp.ticker, action: 'buy', side: opp.side, type: 'limit', count: contracts,
+        ...(opp.side === 'yes' ? { yes_price: opp.price } : { no_price: opp.price }),
+        client_order_id: uuidv4(),
+      });
+      const id = res.order?.order_id || uuidv4();
+      this.activeOrders.set(id, { ...opp, contracts, cost, id, at: new Date(), direction: opp.side === 'yes' ? 'UP' : 'DOWN', volRegime: 'micro' });
+      this.activeTickers.add(opp.ticker); this.totalBets++; this.totalWagered += cost;
+      this._log('✅ MICRO ORDER', `${id.slice(0,8)} $${cost.toFixed(2)} ${opp.side.toUpperCase()} ${opp.ticker}`);
+    } catch(e) { this._log('❌ Micro order failed', e.message); }
+  }
+
   async _place(opp) {
     // ── DRAWDOWN PROTECTION ──
     // If bankroll < 50% of peak, halve bet sizes
@@ -391,6 +525,10 @@ class BTCScalper extends EventEmitter {
     for (const [id, order] of this.activeOrders.entries()) {
       // Skip dry run orders — can't sell them
       if (id.startsWith('dry-')) continue;
+      // Skip micro bets for normal TP/SL — they ride to expiry
+      // (but emergency drawdown exit below still applies)
+      const isMicro = id.startsWith('micro-') || order.volRegime === 'micro';
+      if (isMicro && !emergencyExit) continue;
 
       try {
         // Get current orderbook for this market
@@ -527,16 +665,19 @@ class BTCScalper extends EventEmitter {
             this.totalWins++;
             this.bankroll += pnl;
             this.peak = Math.max(this.peak, this.bankroll);
-            this._streak = Math.max(0, this._streak) + 1; // reset to positive
-            this._log('🎉 WIN', `${order.ticker} → ${result} (we had ${order.side}) | +$${pnl.toFixed(2)} | bank:$${this.bankroll.toFixed(2)} | streak:+${this._streak}`);
+            this._streak = Math.max(0, this._streak) + 1;
+            if (order.volRegime === 'micro') { this._microBets++; this._microWins++; }
+            this._log('🎉 WIN', `${order.ticker} → ${result} (we had ${order.side}) | +$${pnl.toFixed(2)} | bank:$${this.bankroll.toFixed(2)} | streak:+${this._streak}${order.volRegime==='micro'?' [MICRO]':''}`);
           } else {
             this.totalLosses++;
-            this.bankroll += pnl; // pnl is negative
-            this._streak = Math.min(0, this._streak) - 1; // go more negative
-            this._log('💀 LOSS', `${order.ticker} → ${result} (we had ${order.side}) | -$${Math.abs(pnl).toFixed(2)} | bank:$${this.bankroll.toFixed(2)} | streak:${this._streak}`);
+            this.bankroll += pnl;
+            this._streak = Math.min(0, this._streak) - 1;
+            if (order.volRegime === 'micro') this._microBets++;
+            this._log('💀 LOSS', `${order.ticker} → ${result} (we had ${order.side}) | -$${Math.abs(pnl).toFixed(2)} | bank:$${this.bankroll.toFixed(2)} | streak:${this._streak}${order.volRegime==='micro'?' [MICRO]':''}`);
 
-            // Circuit breaker: pause after N consecutive losses
-            if (this._streak <= -this._streakLimit) {
+            // Circuit breaker — micro losses need 6 straight, regular needs 4
+            const limit = order.volRegime === 'micro' ? 6 : this._streakLimit;
+            if (this._streak <= -limit) {
               this._pausedUntil = Date.now() + this._cooldownMs;
               this._log('🧊 CIRCUIT BREAKER', `${Math.abs(this._streak)} consecutive losses — pausing ${this._cooldownMs/60000}min`);
             }
@@ -596,7 +737,7 @@ class BTCScalper extends EventEmitter {
       pnlPct: +((this.bankroll / this.cfg.startBankroll - 1) * 100).toFixed(1),
       progress: +Math.min(100, ((this.bankroll - this.cfg.startBankroll) / (this.cfg.target - this.cfg.startBankroll) * 100)).toFixed(1),
       countdown: { h: Math.floor(rem/3600), m: Math.floor((rem%3600)/60), s: Math.floor(rem%60), total: Math.floor(rem) },
-      stats: { bets: this.totalBets, wins: this.totalWins, losses: this.totalLosses, wr: this.totalBets > 0 ? Math.round(this.totalWins/this.totalBets*100) : 0, wagered: +this.totalWagered.toFixed(2), streak: this._streak, drawdown: this.peak > 0 ? +((1 - this.bankroll/this.peak)*100).toFixed(1) : 0, coolingDown: this._pausedUntil > Date.now() },
+      stats: { bets: this.totalBets, wins: this.totalWins, losses: this.totalLosses, wr: this.totalBets > 0 ? Math.round(this.totalWins/this.totalBets*100) : 0, wagered: +this.totalWagered.toFixed(2), streak: this._streak, drawdown: this.peak > 0 ? +((1 - this.bankroll/this.peak)*100).toFixed(1) : 0, coolingDown: this._pausedUntil > Date.now(), microBets: this._microBets, microWins: this._microWins },
       active: Array.from(this.activeOrders.values()).map(o => ({ ticker: o.ticker, side: o.side, price: o.price, contracts: o.contracts, dir: o.direction, mins: o.minsLeft })),
       btc: this.feed.getStatus(),
       correction: this.correction.getStatus(),
