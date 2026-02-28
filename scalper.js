@@ -172,26 +172,19 @@ class BTCScalper extends EventEmitter {
 
     const now = Date.now();
 
-    // ── DIAGNOSTIC ──
-    if (this._cycleCount % 4 === 0 && markets.length > 0) {
-      const inWindow = markets.filter(m => {
-        const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
-        const mins = (exp - now) / 60000;
-        return mins >= 0.3 && mins <= 5;
-      });
-      if (inWindow.length > 0) {
-        const samples = inWindow.slice(0, 4).map(m => {
-          const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time);
-          const mins = ((exp.getTime() - now) / 60000).toFixed(1);
-          return `${m.ticker} Y:${m.yes_ask||'?'}¢ N:${m.no_ask||'?'}¢ ${mins}m`;
-        });
-        this._log('🔎 DIAG', samples.join(' | '));
-      }
-    }
+    // ── ALWAYS LOG: show where markets are relative to our window ──
+    const marketInfo = markets.map(m => {
+      const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
+      const mins = (exp - now) / 60000;
+      return { ticker: m.ticker, mins, yesAsk: m.yes_ask, noAsk: m.no_ask };
+    });
+    // Log every cycle so we can see the countdown
+    const summary = marketInfo.slice(0, 4).map(m =>
+      `${m.ticker.replace('KXBTC15M-','B').replace('KXETH15M-','E').replace('KXSOL15M-','S').slice(0,12)} ${m.mins.toFixed(1)}m Y:${m.yesAsk||'?'} N:${m.noAsk||'?'}`
+    ).join(' | ');
+    this._log('📊 Scan', summary);
 
     // ── FILTER: 0.3-5 min window ──
-    // Allow RE-ENTRY: don't filter by activeTickers anymore.
-    // Instead, track by ticker+tier to allow multiple entries at different tiers.
     const candidates = markets.filter(m => {
       const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
       const mins = (exp - now) / 60000;
@@ -210,8 +203,14 @@ class BTCScalper extends EventEmitter {
       } catch(e) {}
     }
 
-    if (!scored.length && this._cycleCount % 4 === 0) {
-      this._log('📊 No opps', `Scanned ${Math.min(candidates.length, 15)} markets in window`);
+    if (!scored.length) {
+      // Log WHY nothing qualified
+      const c = candidates[0];
+      const exp = new Date(c.close_time || c.expiration_time || c.expected_expiration_time);
+      const mins = ((exp.getTime() - now) / 60000).toFixed(1);
+      const ya = c.yes_ask || '?', na = c.no_ask || '?';
+      const fav = Math.max(ya||0, na||0);
+      this._log('📊 No opps', `${candidates.length} in window | sample: ${c.ticker} Y:${ya}¢ N:${na}¢ ${mins}m fav:${fav}¢`);
     }
 
     // Sort by EV, take best opportunities
@@ -221,20 +220,83 @@ class BTCScalper extends EventEmitter {
   }
 
   // ════════════════════════════════════════════════════════════
-  //  UNIFIED SCALP ANALYZER — Full 15-Minute Window
+  //  QUANTITATIVE MODEL — Data-Driven Probability
   //
-  //  REALITY: These markets are almost never 50/50. BTC is
-  //  usually clearly above or below the strike.
+  //  OLD APPROACH: "market says 92¢, add 3% time bonus" = MADE UP
+  //  NEW APPROACH: calculate actual flip probability from:
+  //    1. Current BTC price vs strike price
+  //    2. Time remaining
+  //    3. Recent BTC volatility (how much it moves per minute)
+  //    4. TA signals (momentum, trend strength)
   //
-  //  STRATEGY: Buy the favorite across every time horizon.
-  //  Early entries get TP'd by position manager as price rises.
-  //  Late entries ride to settlement.
-  //
-  //  The SAME market gets multiple bites:
-  //  → 12 min left: buy NO@65¢ → TP at 78¢ (+13¢)
-  //  → 5 min left: buy NO@82¢ → TP at 90¢ (+8¢)
-  //  → 1 min left: buy NO@93¢ → settles at 100 (+7¢)
+  //  If our calculated probability significantly exceeds market
+  //  price → real edge. If not → no trade.
   // ════════════════════════════════════════════════════════════
+
+  _extractStrike(market) {
+    // Try multiple ways to get the strike price from market data
+    // Kalshi encodes strike info in various fields
+
+    // Method 1: floor_strike / cap_strike (ranged markets)
+    if (market.floor_strike) return +market.floor_strike;
+    if (market.cap_strike) return +market.cap_strike;
+
+    // Method 2: Parse from title - "Bitcoin above $64,000?" or "above 64000"
+    const title = (market.title || market.subtitle || '').toLowerCase();
+    const priceMatch = title.match(/\$?([\d,]+\.?\d*)/);
+    if (priceMatch) {
+      const val = +priceMatch[1].replace(/,/g, '');
+      if (val > 1000) return val; // looks like a BTC price
+    }
+
+    // Method 3: Parse from yes/no sub titles
+    const yesSub = (market.yes_sub_title || '').toLowerCase();
+    const noSub = (market.no_sub_title || '').toLowerCase();
+    const subMatch = (yesSub + ' ' + noSub).match(/\$?([\d,]+\.?\d*)/);
+    if (subMatch) {
+      const val = +subMatch[1].replace(/,/g, '');
+      if (val > 1000) return val;
+    }
+
+    return null;
+  }
+
+  _calcFlipProbability(currentPrice, strikePrice, minsLeft, volatilityPct) {
+    // Calculate probability that BTC crosses the strike in remaining time
+    // Using simplified Black-Scholes-like model for binary options
+    //
+    // Key insight: BTC needs to move X% to flip. If recent vol says it
+    // moves Y% per minute, we can estimate the probability.
+    //
+    // distance = |currentPrice - strike| / currentPrice (as %)
+    // volPerMin = volatility5m / sqrt(5) (scale from 5-min to 1-min)
+    // volRemaining = volPerMin * sqrt(minsLeft) (scale to remaining time)
+    // zScore = distance / volRemaining
+    // flipProb = normalCDF(-zScore) (probability of crossing)
+
+    if (!currentPrice || !strikePrice || !minsLeft) return 0.5;
+
+    const distance = Math.abs(currentPrice - strikePrice) / currentPrice;
+
+    // Volatility scaling: if we have 5-min vol, scale to per-minute
+    const vol5m = volatilityPct / 100 || 0.001; // default tiny vol if missing
+    const volPerMin = vol5m / Math.sqrt(5);
+    const volRemaining = volPerMin * Math.sqrt(Math.max(0.1, minsLeft));
+
+    if (volRemaining < 0.00001) return currentPrice > strikePrice ? 0.99 : 0.01;
+
+    const zScore = distance / volRemaining;
+
+    // Approximate normal CDF using logistic function
+    // P(flip) ≈ 1 / (1 + exp(1.7 * z))
+    const flipProb = 1 / (1 + Math.exp(1.7 * zScore));
+
+    // If BTC is above strike: YES prob = 1 - flipProb, NO prob = flipProb
+    // If BTC is below strike: YES prob = flipProb, NO prob = 1 - flipProb
+    const yesProb = currentPrice >= strikePrice ? (1 - flipProb) : flipProb;
+
+    return yesProb;
+  }
 
   async _analyze(market, sig) {
     let yesAsk = market.yes_ask || null;
@@ -254,103 +316,140 @@ class BTCScalper extends EventEmitter {
     const minsLeft = (exp - Date.now()) / 60000;
     if (minsLeft < 0.3 || minsLeft > 15) return null;
 
-    // ── VIG CHECK ──
     if (yesAsk && noAsk && yesAsk + noAsk > 105) return null;
 
-    // ── FIND THE FAVORITE ──
-    let favSide, favPrice, favPayout;
-    if ((yesAsk || 0) > (noAsk || 0)) {
-      favSide = 'yes'; favPrice = yesAsk; favPayout = 100 - yesAsk;
+    // ── DUMP MARKET FIELDS (first 5 cycles only, for discovery) ──
+    if (this._cycleCount <= 5 && this._cycleCount % 2 === 1) {
+      const fields = Object.keys(market).filter(k => market[k] != null && market[k] !== '').slice(0, 20);
+      this._log('🔬 FIELDS', `${market.ticker}: ${fields.join(', ')}`);
+      if (market.title) this._log('🔬 TITLE', market.title);
+      if (market.subtitle) this._log('🔬 SUBTITLE', market.subtitle);
+      if (market.yes_sub_title) this._log('🔬 YES_SUB', market.yes_sub_title);
+      if (market.no_sub_title) this._log('🔬 NO_SUB', market.no_sub_title);
+      if (market.floor_strike) this._log('🔬 STRIKE', `floor:${market.floor_strike} cap:${market.cap_strike}`);
+    }
+
+    // ── GET STRIKE PRICE ──
+    const strike = this._extractStrike(market);
+    const btcPrice = sig.price;
+    const vol5m = sig.volatility5m || 0;
+
+    // ── QUANT MODEL: calculate true probability ──
+    let yesProb, noProb, modelSource;
+
+    if (strike && btcPrice && btcPrice > 1000) {
+      // We have both prices → use quantitative model
+      yesProb = this._calcFlipProbability(btcPrice, strike, minsLeft, vol5m);
+      noProb = 1 - yesProb;
+      modelSource = 'QUANT';
+
+      const distPct = ((btcPrice - strike) / strike * 100).toFixed(3);
+      if (this._cycleCount % 3 === 0) {
+        this._log('📐 Model', `${market.ticker} BTC:$${btcPrice.toFixed(0)} strike:$${strike.toFixed(0)} dist:${distPct}% vol:${vol5m.toFixed(3)}% ${minsLeft.toFixed(1)}m → yesP:${(yesProb*100).toFixed(1)}%`);
+      }
     } else {
-      favSide = 'no'; favPrice = noAsk; favPayout = 100 - noAsk;
+      // No strike data → use TA-enhanced estimate
+      // Base: use market midpoint as starting estimate
+      const mid = ((yesAsk||50) + (100-(noAsk||50))) / 2;
+      yesProb = mid / 100;
+
+      // TA adjustments — use actual chart signals
+      const mom = sig.momentum5m || 0;
+      const rsi = sig.rsi || 50;
+      const trend = sig.trend || 'FLAT';
+      const strength = sig.strength || 0;
+
+      // Momentum: strong BTC movement shifts probability
+      if (mom > 0.05)       yesProb += 0.05;
+      else if (mom > 0.02)  yesProb += 0.03;
+      else if (mom < -0.05) yesProb -= 0.05;
+      else if (mom < -0.02) yesProb -= 0.03;
+
+      // RSI extremes: overbought/oversold affect near-term probability
+      if (rsi > 75)      yesProb += 0.02; // overbought, but momentum usually continues short-term
+      else if (rsi < 25) yesProb -= 0.02;
+
+      // Trend strength: strong trends are more likely to continue
+      if (trend === 'STRONG_UP')   yesProb += 0.03;
+      else if (trend === 'UP')     yesProb += 0.01;
+      else if (trend === 'STRONG_DOWN') yesProb -= 0.03;
+      else if (trend === 'DOWN')   yesProb -= 0.01;
+
+      // Time decay: closer to expiry, current state is more likely to persist
+      if (minsLeft < 2) {
+        // Amplify the deviation from 50% — trends are stickier near expiry
+        yesProb = 0.5 + (yesProb - 0.5) * 1.3;
+      }
+
+      yesProb = Math.max(0.02, Math.min(0.98, yesProb));
+      noProb = 1 - yesProb;
+      modelSource = 'TA';
     }
 
-    // ── TIME-BASED TIERS ──
-    // With PROVEN 87% win rate, we can afford to:
-    // 1. Buy slightly cheaper (bigger payouts per win)
-    // 2. Enter slightly earlier (more opportunities)
-    //
-    // At 87% WR buying @80¢: win 20¢ × 0.87 = 17.4¢, lose 80¢ × 0.13 = 10.4¢
-    // NET: +7¢ per trade vs +1.5¢ at 93¢ entry. 5× more profit.
-    //
-    // Tier   | Time Left  | Buy Range | Payout  | Logic
-    // -------|------------|-----------|---------|------
-    // SWING  | 4-5 min    | 78-86¢    | 14-22¢  | Best risk/reward, juiciest payouts
-    // LATE   | 2-4 min    | 82-90¢    | 10-18¢  | Strong conviction, good payout
-    // SNIPE  | 1-2 min    | 86-95¢    | 5-14¢   | Nearly decided
-    // LOCK   | 0.3-1 min  | 90-97¢    | 3-10¢   | All but certain
+    // ── FIND EDGE: model prob vs market price ──
+    // Only trade when OUR probability significantly exceeds what the market is charging
+    let side = null, price = null, edge = 0, prob = 0, reason = '';
 
-    let minPrice, maxPrice, tier;
-    if (minsLeft > 5) {
-      return null; // too early — "favorites" flip constantly
-    } else if (minsLeft > 4) {
-      minPrice = 78; maxPrice = 86; tier = 'SWING';
-    } else if (minsLeft > 2) {
-      minPrice = 82; maxPrice = 90; tier = 'LATE';
-    } else if (minsLeft > 1) {
-      minPrice = 86; maxPrice = 95; tier = 'SNIPE';
-    } else {
-      minPrice = 90; maxPrice = 97; tier = 'LOCK';
+    if (yesAsk && yesProb > (yesAsk / 100) + 0.05) {
+      // Our model says YES is worth more than market charges
+      side = 'yes'; price = yesAsk;
+      prob = yesProb;
+      edge = yesProb - (yesAsk / 100);
+      reason = `YES model:${(yesProb*100).toFixed(0)}% > mkt:${yesAsk}¢ edge:${(edge*100).toFixed(1)}%`;
+    }
+    if (noAsk && noProb > (noAsk / 100) + 0.05) {
+      const noEdge = noProb - (noAsk / 100);
+      // Take the side with bigger edge
+      if (!side || noEdge > edge) {
+        side = 'no'; price = noAsk;
+        prob = noProb;
+        edge = noEdge;
+        reason = `NO model:${(noProb*100).toFixed(0)}% > mkt:${noAsk}¢ edge:${(edge*100).toFixed(1)}%`;
+      }
     }
 
-    if (favPrice < minPrice || favPrice > maxPrice) return null;
-
-    // ── DEDUP: don't stack same ticker+tier ──
-    // Allow re-entry at a DIFFERENT tier (e.g., LATE then SNIPE then LOCK)
-    // But don't buy the same ticker at the same tier twice
-    const tierKey = `${market.ticker}:${tier}`;
-    for (const [, order] of this.activeOrders) {
-      if (order.ticker === market.ticker && order.tier === tier) return null;
+    if (!side || edge < 0.05) {
+      // Log why we're skipping — model doesn't see enough edge
+      if (this._cycleCount % 3 === 0) {
+        const bestEdge = Math.max(
+          yesAsk ? yesProb - yesAsk/100 : -1,
+          noAsk ? noProb - noAsk/100 : -1
+        );
+        this._log('🔍 Skip', `${market.ticker} [${modelSource}] yesP:${(yesProb*100).toFixed(0)}% Y:${yesAsk}¢ N:${noAsk}¢ bestEdge:${(bestEdge*100).toFixed(1)}% (need 5%+) ${minsLeft.toFixed(1)}m`);
+      }
+      return null;
     }
-    // Also limit to max 2 active positions on same ticker
-    let sameTickerCount = 0;
-    for (const [, order] of this.activeOrders) {
-      if (order.ticker === market.ticker) sameTickerCount++;
-    }
-    if (sameTickerCount >= 3) return null;
-
-    // ── TRUE PROBABILITY MODEL ──
-    // Market price is a good estimate, but close to expiry it
-    // underestimates certainty. For early entries, the edge is
-    // momentum continuation → position manager captures via TP.
-
-    let timeBonus;
-    if (minsLeft < 1)      timeBonus = 0.05;
-    else if (minsLeft < 2) timeBonus = 0.04;
-    else if (minsLeft < 4) timeBonus = 0.03;
-    else                   timeBonus = 0.02;  // SWING tier — smaller edge, but bigger payout
-
-    const trueProb = Math.min(0.98, favPrice / 100 + timeBonus);
 
     // ── FEE + EV ──
-    const fee = 0.07 * (favPrice / 100) * (1 - favPrice / 100);
+    const payout = 100 - price;
+    const fee = 0.07 * (price / 100) * (1 - price / 100);
     const feeCents = fee * 100;
-    const netPayout = favPayout - feeCents;
+    const netPayout = payout - feeCents;
     if (netPayout < 2) return null;
 
-    const ev = (trueProb * netPayout) - ((1 - trueProb) * favPrice);
+    const ev = (prob * netPayout) - ((1 - prob) * price);
     if (ev <= 0) return null;
 
-    const edge = timeBonus + (netPayout > 10 ? 0.01 : 0);
+    // ── SIZE BY CONFIDENCE ──
+    // More edge = more contracts. But capped to prevent blowups.
+    const isMicro = edge < 0.10; // small edge = micro size
+    const tier = minsLeft < 1 ? 'LOCK' : minsLeft < 2 ? 'SNIPE' : minsLeft < 4 ? 'LATE' : 'SWING';
 
-    const reason = `${tier} ${favSide.toUpperCase()}@${favPrice}¢ ${minsLeft.toFixed(1)}min pay:${favPayout}¢ trueP:${(trueProb*100).toFixed(0)}% EV:${ev.toFixed(1)}¢`;
-    this._log('🔬 Found', `${market.ticker} ${reason}`);
-
-    // All trades are micro-sized (1-2 contracts) — high frequency, small risk
-    const isMicro = true;
+    reason = `[${modelSource}] ${reason} | ${tier} ${minsLeft.toFixed(1)}m`;
+    this._log('🔬 EDGE', `${market.ticker} ${reason} EV:${ev.toFixed(1)}¢`);
 
     return {
       ticker: market.ticker, title: market.title || market.ticker,
-      side: favSide, price: favPrice, edge: +Math.max(edge, 0.02).toFixed(3),
-      fee: +fee.toFixed(3), ev: +ev.toFixed(1),
-      modelProb: +trueProb.toFixed(3),
-      direction: favSide === 'yes' ? 'UP' : 'DOWN',
-      volRegime: isMicro ? 'micro' : 'scalp',
+      side, price, edge: +edge.toFixed(3), fee: +fee.toFixed(3),
+      ev: +ev.toFixed(1), modelProb: +prob.toFixed(3),
+      direction: side === 'yes' ? 'UP' : 'DOWN',
+      volRegime: isMicro ? 'micro' : 'scalp', tier,
       timeWindow: this.correction.getCurrentTimeWindow(),
-      minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price, tier,
-      payout: favPayout, netPayout: +netPayout.toFixed(1),
-      isMicro,
-      ta: { score: 0, conf: 0, rsi: 0, macd: 0, bbPctB: 0, vwap: 0, regime: tier, reasons: [reason] }
+      minsLeft: +minsLeft.toFixed(1), btcPrice: sig.price,
+      payout, netPayout: +netPayout.toFixed(1), isMicro,
+      ta: { score: sig.score||0, conf: sig.confidence||0, rsi: +(sig.rsi||0).toFixed(1),
+            macd: sig.macdHist ? +(sig.macdHist).toFixed(2) : 0, bbPctB: +(sig.bbPctB||0).toFixed(2),
+            vwap: +(sig.vwapDelta||0).toFixed(3), regime: modelSource, reasons: [reason] }
     };
   }
 
@@ -366,24 +465,23 @@ class BTCScalper extends EventEmitter {
     const tierLabel = opp.tier || (opp.isMicro ? 'MICRO' : 'SCALP');
 
     if (opp.isMicro || opp.volRegime === 'micro') {
-      // ── TIER-BASED SIZING ──
-      // Higher confidence tier = more contracts
-      // SWING (78-86¢): 2-3 contracts — biggest payout, slightly less certain
-      // LATE (82-90¢):  2-4 contracts — good balance
-      // SNIPE (86-95¢): 3-5 contracts — high confidence
-      // LOCK (90-97¢):  3-6 contracts — near certain, max size
-      let minContracts, maxContracts, riskCap;
-      switch (opp.tier) {
-        case 'SWING': minContracts = 2; maxContracts = 3; riskCap = 0.10; break;
-        case 'LATE':  minContracts = 2; maxContracts = 4; riskCap = 0.12; break;
-        case 'SNIPE': minContracts = 3; maxContracts = 5; riskCap = 0.15; break;
-        case 'LOCK':  minContracts = 3; maxContracts = 6; riskCap = 0.18; break;
-        default:      minContracts = 1; maxContracts = 3; riskCap = 0.08; break;
+      // ── EDGE-BASED SIZING ──
+      // Small edge (5-8%) = 2 contracts
+      // Medium edge (8-12%) = 3 contracts
+      // Large edge (12%+) = 4-5 contracts
+      const edgePct = (opp.edge || 0.05) * 100;
+      let maxContracts, riskCap;
+      if (edgePct >= 12) {
+        maxContracts = 5; riskCap = 0.15;
+      } else if (edgePct >= 8) {
+        maxContracts = 3; riskCap = 0.12;
+      } else {
+        maxContracts = 2; riskCap = 0.08;
       }
       const maxRisk = this.bankroll * riskCap * drawdownMult;
-      contracts = Math.max(minContracts, Math.min(maxContracts, Math.floor((maxRisk * 100) / opp.price)));
+      contracts = Math.max(1, Math.min(maxContracts, Math.floor((maxRisk * 100) / opp.price)));
       cost = (contracts * opp.price) / 100;
-      if (cost > this.bankroll * 0.20) return; // hard cap 20% of bankroll per trade
+      if (cost > this.bankroll * 0.20) return;
     } else {
       // ── SCALP SIZING: Kelly for early entries with more room ──
       const b = (100 - opp.price) / opp.price;
