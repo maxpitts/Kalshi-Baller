@@ -94,7 +94,7 @@ class BTCScalper extends EventEmitter {
   // ═══════════════════
 
   _log(tag, msg) {
-    const entry = { t: new Date().toISOString(), tag, msg };
+    const entry = { t: new Date().toISOString(), tag, msg, ev: tag, d: msg };
     this.logs.push(entry);
     if (this.logs.length > 200) this.logs.splice(0, 50);
     console.log(`[${tag}] ${msg}`);
@@ -514,21 +514,50 @@ class BTCScalper extends EventEmitter {
 
   getStatus() {
     const phase = this.learnedData.totalObserved >= this.cfg.minObservations ? 'TRADING' : 'LEARNING';
+    const pnl = +(this.bankroll - (+process.env.STARTING_BANKROLL || 60)).toFixed(2);
+
+    // Active positions as array for dashboard
+    const active = [];
+    for (const [id, o] of this.activeOrders) {
+      active.push({ id, ticker: o.ticker, side: o.side, price: o.price, contracts: o.contracts, cost: o.cost });
+    }
+
+    // Next expiry countdown
+    let nextExpiry = null;
+    for (const [, w] of this.watchlist) {
+      if (!w.resolved && (!nextExpiry || w.expiry < nextExpiry)) nextExpiry = w.expiry;
+    }
+    let countdown = null;
+    if (nextExpiry) {
+      const t = Math.max(0, Math.floor((nextExpiry - Date.now()) / 1000));
+      countdown = { total: t, h: Math.floor(t/3600), m: Math.floor((t%3600)/60), s: t % 60 };
+    }
+
     return {
       running: this.running, paused: this.paused, phase,
       bankroll: +this.bankroll.toFixed(2), peak: +this.peak.toFixed(2),
+      pnl,
       btcPrice: this.feed.getSignals().price || 0,
+      btc: { price: this.feed.getSignals().price || 0 },
       source: this.feed.candleSource || this.feed.source || '?',
-      activeOrders: this.activeOrders.size, watching: this.watchlist.size,
+      strategy: phase === 'LEARNING' ? `Learning (${this.learnedData.totalObserved}/${this.cfg.minObservations})` : `Data-Driven (${this.learnedData.totalObserved} obs)`,
+      active,
+      countdown,
+      watching: this.watchlist.size,
+      log: this.logs.slice(-30),
+      recentBets: this.bets.slice(-20).map(b => ({
+        ...b, ticker: b.ticker, side: b.side, won: b.won,
+        pnl: b.pnl, price: b.price,
+      })),
       stats: {
         bets: this.totalBets, wins: this.totalWins, losses: this.totalLosses,
         wr: this.totalBets > 0 ? Math.round(this.totalWins / this.totalBets * 100) : 0,
         wagered: +this.totalWagered.toFixed(2), streak: this._streak,
+        drawdown: this.peak > 0 ? +((1 - this.bankroll / this.peak) * 100).toFixed(1) : 0,
         observations: this.learnedData.totalObserved,
-        buckets: Object.keys(this.learnedData.buckets).length,
+        bucketCount: Object.keys(this.learnedData.buckets).length,
       },
-      logs: this.logs.slice(-30), bets_history: this.bets.slice(-20),
-      buckets: this.learnedData.buckets,
+      bucketData: this.learnedData.buckets,
     };
   }
 }
