@@ -18,7 +18,7 @@ class BTCScalper extends EventEmitter {
       priceMs: cfg.priceMs || +process.env.PRICE_POLL_MS || 15000,
       maxBetPct: cfg.maxBetPct || +process.env.MAX_BET_FRACTION || 0.10,
       minEdge: cfg.minEdge || +process.env.MIN_EDGE || 0.02,
-      maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 8,
+      maxBets: cfg.maxBets || +process.env.MAX_SIMULTANEOUS_BETS || 12,
       dryRun: process.env.DRY_RUN === 'true',
     };
 
@@ -266,29 +266,31 @@ class BTCScalper extends EventEmitter {
     }
 
     // ── TIME-BASED TIERS ──
-    // LESSON LEARNED: 55-75¢ is NOT a favorite. It's a coin flip
-    // with a label. Entry at 72¢ went to 1¢. The market flips
-    // constantly in the first 10 minutes.
+    // With PROVEN 87% win rate, we can afford to:
+    // 1. Buy slightly cheaper (bigger payouts per win)
+    // 2. Enter slightly earlier (more opportunities)
     //
-    // ONLY trade when:
-    // 1. Price is HIGH (85¢+) = real conviction, not noise
-    // 2. Time is SHORT (<5 min) = less time for reversal
+    // At 87% WR buying @80¢: win 20¢ × 0.87 = 17.4¢, lose 80¢ × 0.13 = 10.4¢
+    // NET: +7¢ per trade vs +1.5¢ at 93¢ entry. 5× more profit.
     //
-    // Tier   | Time Left  | Buy Range | Logic
-    // -------|------------|-----------|------
-    // LATE   | 3-5 min    | 85-92¢    | Strong conviction confirmed
-    // SNIPE  | 1-3 min    | 88-95¢    | Nearly decided
-    // LOCK   | 0.3-1 min  | 91-97¢    | All but certain
+    // Tier   | Time Left  | Buy Range | Payout  | Logic
+    // -------|------------|-----------|---------|------
+    // SWING  | 4-5 min    | 78-86¢    | 14-22¢  | Best risk/reward, juiciest payouts
+    // LATE   | 2-4 min    | 82-90¢    | 10-18¢  | Strong conviction, good payout
+    // SNIPE  | 1-2 min    | 86-95¢    | 5-14¢   | Nearly decided
+    // LOCK   | 0.3-1 min  | 90-97¢    | 3-10¢   | All but certain
 
     let minPrice, maxPrice, tier;
     if (minsLeft > 5) {
       return null; // too early — "favorites" flip constantly
-    } else if (minsLeft > 3) {
-      minPrice = 85; maxPrice = 92; tier = 'LATE';
+    } else if (minsLeft > 4) {
+      minPrice = 78; maxPrice = 86; tier = 'SWING';
+    } else if (minsLeft > 2) {
+      minPrice = 82; maxPrice = 90; tier = 'LATE';
     } else if (minsLeft > 1) {
-      minPrice = 88; maxPrice = 95; tier = 'SNIPE';
+      minPrice = 86; maxPrice = 95; tier = 'SNIPE';
     } else {
-      minPrice = 91; maxPrice = 97; tier = 'LOCK';
+      minPrice = 90; maxPrice = 97; tier = 'LOCK';
     }
 
     if (favPrice < minPrice || favPrice > maxPrice) return null;
@@ -305,7 +307,7 @@ class BTCScalper extends EventEmitter {
     for (const [, order] of this.activeOrders) {
       if (order.ticker === market.ticker) sameTickerCount++;
     }
-    if (sameTickerCount >= 2) return null;
+    if (sameTickerCount >= 3) return null;
 
     // ── TRUE PROBABILITY MODEL ──
     // Market price is a good estimate, but close to expiry it
@@ -314,8 +316,9 @@ class BTCScalper extends EventEmitter {
 
     let timeBonus;
     if (minsLeft < 1)      timeBonus = 0.05;
-    else if (minsLeft < 3) timeBonus = 0.04;
-    else                   timeBonus = 0.03;
+    else if (minsLeft < 2) timeBonus = 0.04;
+    else if (minsLeft < 4) timeBonus = 0.03;
+    else                   timeBonus = 0.02;  // SWING tier — smaller edge, but bigger payout
 
     const trueProb = Math.min(0.98, favPrice / 100 + timeBonus);
 
@@ -363,11 +366,24 @@ class BTCScalper extends EventEmitter {
     const tierLabel = opp.tier || (opp.isMicro ? 'MICRO' : 'SCALP');
 
     if (opp.isMicro || opp.volRegime === 'micro') {
-      // ── MICRO SIZING: 1-2 contracts, max $1 or 5% of bank ──
-      const maxRisk = Math.min(1.00, this.bankroll * 0.05) * drawdownMult;
-      contracts = Math.max(1, Math.min(2, Math.floor((maxRisk * 100) / opp.price)));
+      // ── TIER-BASED SIZING ──
+      // Higher confidence tier = more contracts
+      // SWING (78-86¢): 2-3 contracts — biggest payout, slightly less certain
+      // LATE (82-90¢):  2-4 contracts — good balance
+      // SNIPE (86-95¢): 3-5 contracts — high confidence
+      // LOCK (90-97¢):  3-6 contracts — near certain, max size
+      let minContracts, maxContracts, riskCap;
+      switch (opp.tier) {
+        case 'SWING': minContracts = 2; maxContracts = 3; riskCap = 0.10; break;
+        case 'LATE':  minContracts = 2; maxContracts = 4; riskCap = 0.12; break;
+        case 'SNIPE': minContracts = 3; maxContracts = 5; riskCap = 0.15; break;
+        case 'LOCK':  minContracts = 3; maxContracts = 6; riskCap = 0.18; break;
+        default:      minContracts = 1; maxContracts = 3; riskCap = 0.08; break;
+      }
+      const maxRisk = this.bankroll * riskCap * drawdownMult;
+      contracts = Math.max(minContracts, Math.min(maxContracts, Math.floor((maxRisk * 100) / opp.price)));
       cost = (contracts * opp.price) / 100;
-      if (cost > this.bankroll * 0.08) return;
+      if (cost > this.bankroll * 0.20) return; // hard cap 20% of bankroll per trade
     } else {
       // ── SCALP SIZING: Kelly for early entries with more room ──
       const b = (100 - opp.price) / opp.price;
