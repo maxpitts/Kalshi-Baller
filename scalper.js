@@ -161,12 +161,12 @@ class BTCScalper extends EventEmitter {
       return mins >= 2 && mins <= 25;
     });
 
-    // ── MICRO BETS: near-expiry sniping, 1-4 min out ──
+    // ── MICRO BETS: near-expiry sniping, 0.3-3.5 min out ──
     const microCandidates = markets.filter(m => {
       if (this.activeTickers.has(m.ticker)) return false;
       const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time).getTime();
       const mins = (exp - now) / 60000;
-      return mins >= 1 && mins <= 4;
+      return mins >= 0.3 && mins <= 3.5;
     });
 
     // Run micro bets first (they're time-sensitive)
@@ -357,15 +357,22 @@ class BTCScalper extends EventEmitter {
   }
 
   // ════════════════════════════════════════════════
-  //  MICRO BETS — Near-Expiry Sniping
+  //  MICRO BETS — Near-Expiry Favorite Sniping
   //
-  //  1-4 min from close, outcome is nearly decided.
-  //  Buy the heavy favorite side for 1-2 contracts.
-  //  High win rate, small profit per trade.
+  //  REALITY CHECK: Kalshi 15-min crypto markets are almost
+  //  never 50/50. They're 90/10 or 95/5 because BTC is clearly
+  //  above or below the strike. The uncertain middle doesn't exist.
   //
-  //  Key: ONLY buy the side momentum confirms.
-  //  We're not predicting — we're reading the scoreboard
-  //  late in the game and betting on the team that's winning.
+  //  THE ACTUAL EDGE: Close to expiry, the market is slow to
+  //  price in near-certainty. If NO is 92¢ with 2 min left,
+  //  true probability is probably 97%+ (BTC can't move enough
+  //  to flip in 2 min). That ~5¢ gap is our edge.
+  //
+  //  Strategy:
+  //  - Buy the heavy favorite (75-97¢) in the last 3 minutes
+  //  - The closer to expiry, the higher we'll pay (more certain)
+  //  - 1-2 contracts per trade, high frequency
+  //  - Target: 80%+ win rate, small but steady profits
   // ════════════════════════════════════════════════
 
   async _analyzeMicro(market, sig) {
@@ -384,60 +391,68 @@ class BTCScalper extends EventEmitter {
 
     const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
     const minsLeft = (exp - Date.now()) / 60000;
-    if (minsLeft < 0.5 || minsLeft > 4) return null;
+    if (minsLeft < 0.3 || minsLeft > 3.5) return null;
 
-    // Log what we see (every micro candidate)
-    this._log('🔸 Micro prices', `${market.ticker} Y:${yesAsk}¢ N:${noAsk}¢ ${minsLeft.toFixed(1)}min`);
+    this._log('🔸 Micro scan', `${market.ticker} Y:${yesAsk}¢ N:${noAsk}¢ ${minsLeft.toFixed(1)}min`);
 
-    // ── IDENTIFY THE FAVORITE ──
-    // Buy the side priced 70-92¢ (strong favorite)
-    // The market itself IS the signal — if YES is 80¢ with 2min left,
-    // that means BTC is clearly above the strike. We don't need separate
-    // momentum data to confirm what the entire market is already showing.
-
-    let side = null, price = null, payout = null, reason = '';
-
-    // Optional momentum boost (but NOT required)
-    const mom = sig.momentum5m || 0;
-    let momBoost = false;
-
-    if (yesAsk >= 70 && yesAsk <= 92) {
-      side = 'yes'; price = yesAsk;
-      payout = 100 - yesAsk;
-      reason = `MICRO YES@${yesAsk}¢ ${minsLeft.toFixed(1)}min`;
-      if (mom > 0.01) { momBoost = true; reason += ' +mom↑'; }
-      // BLOCK if momentum strongly opposes (BTC dumping hard while YES is favorite)
-      if (mom < -0.05) return null;
-    } else if (noAsk >= 70 && noAsk <= 92) {
-      side = 'no'; price = noAsk;
-      payout = 100 - noAsk;
-      reason = `MICRO NO@${noAsk}¢ ${minsLeft.toFixed(1)}min`;
-      if (mom < -0.01) { momBoost = true; reason += ' +mom↓'; }
-      if (mom > 0.05) return null;
+    // ── FIND THE FAVORITE ──
+    let favSide, favPrice, favPayout;
+    if (yesAsk > noAsk) {
+      favSide = 'yes'; favPrice = yesAsk; favPayout = 100 - yesAsk;
+    } else {
+      favSide = 'no'; favPrice = noAsk; favPayout = 100 - noAsk;
     }
 
-    if (!side) return null;
+    // ── PRICE/TIME TIERS ──
+    // Closer to expiry = we pay more but win more often
+    // The edge is: trueProb > marketPrice because market is slow to update
+    //
+    // Tier 1: 2-3.5 min left → buy at 75-90¢ (need more room for movement)
+    // Tier 2: 1-2 min left   → buy at 85-95¢ (nearly decided)
+    // Tier 3: 0.3-1 min left → buy at 90-97¢ (all but certain)
 
-    // Fee + payout check
-    const fee = 0.07 * (price / 100) * (1 - price / 100);
+    let minPrice, maxPrice;
+    if (minsLeft > 2) {
+      minPrice = 75; maxPrice = 90;
+    } else if (minsLeft > 1) {
+      minPrice = 85; maxPrice = 95;
+    } else {
+      minPrice = 90; maxPrice = 97;
+    }
+
+    if (favPrice < minPrice || favPrice > maxPrice) {
+      return null;
+    }
+
+    // ── TRUE PROBABILITY ESTIMATE ──
+    // The key insight: with T minutes left, BTC needs to move X% to flip.
+    // BTC 15-min vol is roughly 0.1-0.3%. With 2 min left, it needs ~0.05% to flip.
+    // If it's already moved 0.2% in the "right" direction, flip probability is tiny.
+    //
+    // Simple model: trueProb = marketPrice/100 + timeBonusFraction
+    // Closer to expiry → bigger bonus (less time for reversal)
+    const timeBonus = minsLeft < 1 ? 0.05 : minsLeft < 2 ? 0.04 : 0.03;
+    const trueProb = Math.min(0.98, favPrice / 100 + timeBonus);
+
+    // ── FEE + EV CALC ──
+    const fee = 0.07 * (favPrice / 100) * (1 - favPrice / 100);
     const feeCents = fee * 100;
-    const netPayout = payout - feeCents;
-    if (netPayout < 5) return null;
+    const netPayout = favPayout - feeCents;
+    if (netPayout < 2) return null; // need at least 2¢ net payout
 
-    // Win probability: use market price as base
-    // Market says 80% → we trust that. Add small boost for momentum confirm.
-    const impliedProb = price / 100;
-    const estWinRate = Math.min(0.95, impliedProb + (momBoost ? 0.03 : 0.01));
+    // EV = (trueProb × netPayout) - ((1-trueProb) × favPrice)
+    const ev = (trueProb * netPayout) - ((1 - trueProb) * favPrice);
 
-    // EV check
-    const ev = (estWinRate * netPayout) - ((1 - estWinRate) * price);
-    if (ev <= 0) return null;
+    if (ev <= 0) {
+      this._log('🔸 Micro -EV', `${market.ticker} ${favSide.toUpperCase()}@${favPrice}¢ EV:${ev.toFixed(1)}¢ (trueP:${(trueProb*100).toFixed(0)}%)`);
+      return null;
+    }
 
-    // Tighter near expiry: if <1.5 min left, need 75+¢ (more certain)
-    if (minsLeft < 1.5 && price < 75) return null;
+    const reason = `MICRO ${favSide.toUpperCase()}@${favPrice}¢ ${minsLeft.toFixed(1)}min payout:${favPayout}¢ trueP:${(trueProb*100).toFixed(0)}%`;
 
     return {
-      ticker: market.ticker, side, price, payout, netPayout: +netPayout.toFixed(1),
+      ticker: market.ticker, side: favSide, price: favPrice,
+      payout: favPayout, netPayout: +netPayout.toFixed(1),
       fee: +feeCents.toFixed(1), ev: +ev.toFixed(1), minsLeft: +minsLeft.toFixed(1),
       reason, isMicro: true
     };
