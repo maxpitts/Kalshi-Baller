@@ -33,6 +33,12 @@ class BTCScalper extends EventEmitter {
     this.totalBets = 0; this.totalWins = 0; this.totalLosses = 0; this.totalWagered = 0;
     this._intervals = []; this._cycleCount = 0;
 
+    // Loss streak circuit breaker
+    this._streak = 0;            // negative = consecutive losses
+    this._pausedUntil = 0;       // timestamp: don't bet until this time
+    this._streakLimit = 4;       // pause after this many consecutive losses
+    this._cooldownMs = 10 * 60000; // 10 min cooldown
+
     // Restore correction state
     try { if (fs.existsSync(CORR_FILE)) this.correction.restore(fs.readFileSync(CORR_FILE, 'utf8')); } catch(e){}
     this.correction.on('update', ev => this.emit('correction', ev));
@@ -79,14 +85,22 @@ class BTCScalper extends EventEmitter {
 
       if (this.activeOrders.size >= this.cfg.maxBets) { this.emit('status', this.getStatus()); return; }
 
+      // Circuit breaker: pause after consecutive losses
+      if (this._pausedUntil > Date.now()) {
+        const secsLeft = Math.ceil((this._pausedUntil - Date.now()) / 1000);
+        if (this._cycleCount % 4 === 0) this._log('🧊 Cooldown', `${secsLeft}s left after ${Math.abs(this._streak)} consecutive losses`);
+        this.emit('status', this.getStatus());
+        return;
+      }
+
       const sig = this.feed.getSignals();
       if (!sig.price) { this._log('⚠️ No BTC price'); return; }
 
       // Heartbeat
-      const candleInfo = this.feed.candles?.length || 0;
       const src = this.feed.candleSource || this.feed.source || '?';
-      const mom = sig.momentum5m?.toFixed(3) || '0';
-      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | mom5m:${mom}% | ${candleInfo} candles [${src}] | bankroll:$${this.bankroll.toFixed(2)}`);
+      const dd = this.peak > 0 ? ((1 - this.bankroll/this.peak)*100).toFixed(0) : '0';
+      const streakStr = this._streak > 0 ? `W${this._streak}` : this._streak < 0 ? `L${Math.abs(this._streak)}` : '-';
+      this._log('💓 Cycle', `$${sig.price?.toLocaleString()} | bank:$${this.bankroll.toFixed(2)} dd:${dd}% | ${streakStr} | ${this.totalWins}W/${this.totalLosses}L | [${src}]`);
 
       await this._findAndBet(sig);
       this.emit('status', this.getStatus());
@@ -95,31 +109,31 @@ class BTCScalper extends EventEmitter {
 
   async _findAndBet(sig) {
     let markets = [];
-    try {
-      // Try series_ticker first
-      const r = await this.kalshi.getMarkets({ series_ticker: 'KXBTC15M', status: 'open', limit: 100 });
-      markets = r.markets || [];
-      if (this._cycleCount % 5 === 1) this._log('📡 Markets', `${markets.length} KXBTC15M open`);
-    } catch(e) {
-      this._log('⚠️ Series fetch failed', e.message);
-    }
 
+    // Scan multiple crypto 15-min series
+    const series = ['KXBTC15M', 'KXETH15M', 'KXSOL15M'];
+    for (const ticker of series) {
+      try {
+        const r = await this.kalshi.getMarkets({ series_ticker: ticker, status: 'open', limit: 50 });
+        const found = r.markets || [];
+        markets.push(...found);
+      } catch(e) {}
+    }
+    if (this._cycleCount % 5 === 1) this._log('📡 Markets', `${markets.length} across BTC/ETH/SOL`);
+
+    // Fallback: broad search
     if (!markets.length) {
       try {
-        // Fallback: search all open markets for BTC
         const r = await this.kalshi.getMarkets({ status: 'open', limit: 1000 });
-        const allMarkets = r.markets || [];
-        this._log('📡 Fallback search', `${allMarkets.length} total open markets`);
-        markets = allMarkets.filter(m => {
+        const all = r.markets || [];
+        markets = all.filter(m => {
           const t = (m.ticker || '').toUpperCase();
           const title = (m.title || '').toLowerCase();
-          return (t.includes('BTC') || t.includes('BITCOIN') || title.includes('bitcoin') || title.includes('btc')) &&
-                 (title.includes('15 min') || title.includes('15min') || title.includes('up or down') || t.includes('15M'));
+          return (t.includes('15M') || title.includes('15 min')) &&
+                 (t.includes('BTC') || t.includes('ETH') || t.includes('SOL') ||
+                  title.includes('bitcoin') || title.includes('ethereum') || title.includes('solana'));
         });
-        this._log('📡 Filtered BTC', `${markets.length} BTC 15m markets found`);
-        if (markets.length > 0) {
-          this._log('📡 Sample ticker', markets[0].ticker + ' | ' + markets[0].title);
-        }
+        if (markets.length) this._log('📡 Fallback', `${markets.length} crypto 15m markets`);
       } catch(e2) { this._log('❌ Market fetch failed', e2.message); return; }
     }
 
@@ -192,6 +206,12 @@ class BTCScalper extends EventEmitter {
       } catch(e) { return null; }
     }
     if (!yesAsk && !noAsk) return null;
+
+    // ── VIG/SPREAD CHECK ──
+    // If YES + NO asks > 105, the built-in vig eats our edge
+    if (yesAsk && noAsk && yesAsk + noAsk > 105) {
+      return null; // silent skip — too much vig
+    }
 
     const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
     const minsLeft = (exp - Date.now()) / 60000;
@@ -276,14 +296,35 @@ class BTCScalper extends EventEmitter {
   }
 
   async _place(opp) {
+    // ── DRAWDOWN PROTECTION ──
+    // If bankroll < 50% of peak, halve bet sizes
+    const drawdown = 1 - (this.bankroll / this.peak);
+    const drawdownMult = drawdown > 0.5 ? 0.25 : drawdown > 0.3 ? 0.5 : 1.0;
+    if (drawdown > 0.3 && this._cycleCount % 10 === 0) {
+      this._log('🛡️ Drawdown', `${(drawdown*100).toFixed(0)}% from peak $${this.peak.toFixed(2)} — sizing ${drawdownMult < 1 ? 'reduced' : 'normal'}`);
+    }
+
+    // ── KELLY CRITERION SIZING ──
+    // Kelly fraction = (bp - q) / b
+    // where b = payout odds, p = win prob, q = 1-p
+    // For binary: b = (100 - price) / price, p = modelProb
+    const b = (100 - opp.price) / opp.price; // payout ratio
+    const p = opp.modelProb;
+    const q = 1 - p;
+    let kellyFraction = (b * p - q) / b;
+    kellyFraction = Math.max(0, Math.min(0.15, kellyFraction)); // cap at 15%
+
+    // Use half-Kelly for safety (industry standard)
+    const halfKelly = kellyFraction * 0.5;
+
     const sizeMult = this.correction.getSizeMultiplier();
-    let maxBet = this.bankroll * this.cfg.maxBetPct * sizeMult;
-    maxBet = Math.max(1, Math.min(maxBet, this.bankroll * 0.20));
+    let maxBet = this.bankroll * halfKelly * sizeMult * drawdownMult;
+    maxBet = Math.max(1, Math.min(maxBet, this.bankroll * 0.15)); // hard cap 15%
     const contracts = Math.max(1, Math.floor((maxBet * 100) / opp.price));
     const cost = (contracts * opp.price) / 100;
-    if (cost > this.bankroll * 0.25) return;
+    if (cost > this.bankroll * 0.20) return;
 
-    this._log('🎯 BET', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} | net edge:${((opp.edge-opp.fee)*100).toFixed(1)}% | ${opp.ta?.reasons?.[0] || ''} | ${opp.minsLeft}min`);
+    this._log('🎯 BET', `${opp.side.toUpperCase()} ${opp.ticker} @ ${opp.price}¢ ×${contracts} ($${cost.toFixed(2)}) | net:${((opp.edge-opp.fee)*100).toFixed(1)}% kelly:${(halfKelly*100).toFixed(1)}% | ${opp.ta?.reasons?.[0] || ''} | ${opp.minsLeft}min`);
 
     if (this.cfg.dryRun) {
       const id = 'dry-' + uuidv4().slice(0,8);
@@ -321,8 +362,24 @@ class BTCScalper extends EventEmitter {
 
           this.correction.recordOutcome({ ticker: order.ticker, side: order.side, buyPrice: order.price, contracts: order.contracts, won, pnl, direction: order.direction, volRegime: order.volRegime });
 
-          if (won) { this.totalWins++; this._log('🎉 WIN', `${order.ticker} → ${result} (we had ${order.side}) | +$${pnl.toFixed(2)}`); }
-          else { this.totalLosses++; this._log('💀 LOSS', `${order.ticker} → ${result} (we had ${order.side}) | -$${Math.abs(pnl).toFixed(2)}`); }
+          if (won) {
+            this.totalWins++;
+            this.bankroll += pnl;
+            this.peak = Math.max(this.peak, this.bankroll);
+            this._streak = Math.max(0, this._streak) + 1; // reset to positive
+            this._log('🎉 WIN', `${order.ticker} → ${result} (we had ${order.side}) | +$${pnl.toFixed(2)} | bank:$${this.bankroll.toFixed(2)} | streak:+${this._streak}`);
+          } else {
+            this.totalLosses++;
+            this.bankroll += pnl; // pnl is negative
+            this._streak = Math.min(0, this._streak) - 1; // go more negative
+            this._log('💀 LOSS', `${order.ticker} → ${result} (we had ${order.side}) | -$${Math.abs(pnl).toFixed(2)} | bank:$${this.bankroll.toFixed(2)} | streak:${this._streak}`);
+
+            // Circuit breaker: pause after N consecutive losses
+            if (this._streak <= -this._streakLimit) {
+              this._pausedUntil = Date.now() + this._cooldownMs;
+              this._log('🧊 CIRCUIT BREAKER', `${Math.abs(this._streak)} consecutive losses — pausing ${this._cooldownMs/60000}min`);
+            }
+          }
 
           this.bets.push({ ...order, result, won, pnl: +pnl.toFixed(2), resolvedAt: new Date().toISOString() });
           this.activeOrders.delete(id); this.activeTickers.delete(order.ticker);
@@ -378,7 +435,7 @@ class BTCScalper extends EventEmitter {
       pnlPct: +((this.bankroll / this.cfg.startBankroll - 1) * 100).toFixed(1),
       progress: +Math.min(100, ((this.bankroll - this.cfg.startBankroll) / (this.cfg.target - this.cfg.startBankroll) * 100)).toFixed(1),
       countdown: { h: Math.floor(rem/3600), m: Math.floor((rem%3600)/60), s: Math.floor(rem%60), total: Math.floor(rem) },
-      stats: { bets: this.totalBets, wins: this.totalWins, losses: this.totalLosses, wr: this.totalBets > 0 ? Math.round(this.totalWins/this.totalBets*100) : 0, wagered: +this.totalWagered.toFixed(2) },
+      stats: { bets: this.totalBets, wins: this.totalWins, losses: this.totalLosses, wr: this.totalBets > 0 ? Math.round(this.totalWins/this.totalBets*100) : 0, wagered: +this.totalWagered.toFixed(2), streak: this._streak, drawdown: this.peak > 0 ? +((1 - this.bankroll/this.peak)*100).toFixed(1) : 0, coolingDown: this._pausedUntil > Date.now() },
       active: Array.from(this.activeOrders.values()).map(o => ({ ticker: o.ticker, side: o.side, price: o.price, contracts: o.contracts, dir: o.direction, mins: o.minsLeft })),
       btc: this.feed.getStatus(),
       correction: this.correction.getStatus(),
