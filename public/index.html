@@ -1,135 +1,107 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>YOLO ENGINE v2 — BTC Scalper</title>
+<title>YOLO ENGINE v3 — Crypto Scalper</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#07060d;--card:rgba(14,12,24,0.92);--border:rgba(255,255,255,0.06);--accent:#f59e0b;--green:#22c55e;--red:#ef4444;--purple:#a855f7;--blue:#3b82f6;--dim:rgba(255,255,255,0.35);--text:#f0f0f0;--mono:'JetBrains Mono',monospace;--sans:'Outfit',sans-serif}
+:root{--bg:#07060d;--card:rgba(14,12,24,0.92);--border:rgba(255,255,255,0.06);--accent:#f59e0b;--green:#22c55e;--red:#ef4444;--purple:#a855f7;--blue:#3b82f6;--cyan:#06b6d4;--dim:rgba(255,255,255,0.35);--text:#f0f0f0;--mono:'JetBrains Mono',monospace;--sans:'Outfit',sans-serif}
 body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow-x:hidden;min-height:100vh}
 .bg{position:fixed;inset:0;z-index:0;overflow:hidden}
 .bg::before{content:'';position:absolute;top:20%;left:30%;width:600px;height:600px;background:radial-gradient(circle,rgba(245,158,11,0.04),transparent 70%);animation:pulse 8s ease-in-out infinite}
 .bg::after{content:'';position:absolute;bottom:10%;right:20%;width:500px;height:500px;background:radial-gradient(circle,rgba(168,85,247,0.03),transparent 70%);animation:pulse 12s ease-in-out infinite reverse}
 @keyframes pulse{0%,100%{transform:scale(1);opacity:0.5}50%{transform:scale(1.3);opacity:1}}
 .app{position:relative;z-index:1;max-width:1400px;margin:0 auto;padding:20px}
-
-/* Header */
-.header{display:flex;justify-content:space-between;align-items:center;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:20px}
+.header{display:flex;justify-content:space-between;align-items:center;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:20px;flex-wrap:wrap;gap:10px}
 .logo{display:flex;align-items:center;gap:14px}
 .logo-icon{font-size:28px}
 .logo h1{font-size:18px;font-weight:800;letter-spacing:2px;background:linear-gradient(135deg,var(--accent),#fb923c);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .logo sub{font-size:11px;color:var(--dim);letter-spacing:1px;font-weight:400}
-.controls{display:flex;gap:8px}
+.controls{display:flex;gap:8px;align-items:center}
 .btn{font-family:var(--mono);font-size:12px;font-weight:600;padding:8px 18px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.04);color:var(--text);cursor:pointer;transition:all 0.2s;letter-spacing:0.5px}
 .btn:hover{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.12)}
 .btn.go{background:rgba(34,197,94,0.15);border-color:rgba(34,197,94,0.3);color:var(--green)}
 .btn.stop{background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.3);color:var(--red)}
-.mode-badge{font-family:var(--mono);font-size:11px;padding:5px 12px;border-radius:16px;letter-spacing:1px;font-weight:700}
-
-/* Ticker strip */
-.ticker{background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;gap:20px;overflow:hidden}
+.badge{font-family:var(--mono);font-size:11px;padding:5px 12px;border-radius:16px;letter-spacing:1px;font-weight:700}
+.ticker{background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .ticker .btc{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--accent);white-space:nowrap}
-.ticker .signal{font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:6px;font-weight:600}
+.ticker .chip{font-family:var(--mono);font-size:11px;padding:4px 10px;border-radius:6px;font-weight:600;white-space:nowrap}
 .ticker .meta{font-size:11px;color:var(--dim);white-space:nowrap}
-
-/* Grid */
 .grid{display:grid;grid-template-columns:280px 1fr 300px;gap:16px;margin-bottom:16px}
 @media(max-width:1100px){.grid{grid-template-columns:1fr 1fr} .grid>:last-child{grid-column:span 2}}
 @media(max-width:700px){.grid{grid-template-columns:1fr} .grid>:last-child{grid-column:span 1}}
-
-/* Cards */
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;position:relative;overflow:hidden}
 .card-title{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);margin-bottom:12px;font-weight:600}
 .big-num{font-family:var(--mono);font-size:32px;font-weight:700;line-height:1}
 .sub-num{font-family:var(--mono);font-size:13px;color:var(--dim);margin-top:4px}
-
-/* Countdown */
 .countdown{text-align:center;padding:24px 18px}
 .countdown .time{font-family:var(--mono);font-size:40px;font-weight:700;letter-spacing:3px}
 .countdown .time .colon{animation:blink 1s step-end infinite;opacity:0.5}
-@keyframes blink{50%{opacity:1}}
-
-/* Stats row */
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
-.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:center}
-.stat .label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:6px}
-.stat .val{font-family:var(--mono);font-size:20px;font-weight:700}
-
-/* Correction panel */
-.corr{background:linear-gradient(135deg,rgba(15,10,25,0.95),rgba(20,15,35,0.95));border:1px solid rgba(168,85,247,0.2);border-radius:14px;padding:18px;margin-bottom:16px}
-.corr-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
-.corr-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-.corr-cell{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:12px;text-align:center}
-.corr-cell .lbl{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:4px}
-.corr-cell .v{font-family:var(--mono);font-size:20px;font-weight:700}
-.dim-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.dim-row{display:flex;flex-wrap:wrap;gap:6px}
-.dim-tag{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:6px 10px;font-size:11px;display:flex;flex-direction:column;gap:2px}
-.dim-tag .nm{font-weight:600;font-size:10px}
-.dim-tag .wr{font-family:var(--mono);font-size:10px;color:var(--dim)}
-
-/* Log & bets */
+@keyframes blink{0%,100%{opacity:0.5}50%{opacity:0.15}}
+.progress-wrap{background:rgba(255,255,255,0.04);border-radius:6px;height:6px;margin-top:10px;overflow:hidden}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),#fb923c);border-radius:6px;transition:width 0.5s}
 .bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media(max-width:700px){.bottom-grid{grid-template-columns:1fr}}
-.log-entry{font-family:var(--mono);font-size:11px;padding:6px 0;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:baseline}
-.log-entry .ts{color:var(--dim);font-size:10px;flex-shrink:0}
-.log-entry .ev{font-weight:600;flex-shrink:0}
-.log-entry .det{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bet-row{font-family:var(--mono);font-size:11px;padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
-.bet-row .side{font-weight:700;padding:2px 8px;border-radius:4px;font-size:10px}
-.bet-row .side.yes{background:rgba(34,197,94,0.15);color:var(--green)}
-.bet-row .side.no{background:rgba(239,68,68,0.15);color:var(--red)}
-
-/* Progress bar */
-.progress-wrap{height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden;margin-top:10px}
-.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),#fb923c);border-radius:3px;transition:width 0.5s}
-
-/* Dots */
-.dots{display:flex;gap:3px;flex-wrap:wrap;margin-top:8px}
-.dot{width:14px;height:14px;border-radius:3px;font-size:8px;display:flex;align-items:center;justify-content:center}
-.dot.w{background:rgba(34,197,94,0.3)}
-.dot.l{background:rgba(239,68,68,0.3)}
+.log-entry{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.03);font-size:12px}
+.log-entry .ts{font-family:var(--mono);color:var(--dim);font-size:10px;white-space:nowrap}
+.log-entry .ev{font-weight:600;white-space:nowrap}
+.log-entry .det{color:var(--dim);font-family:var(--mono);font-size:11px;word-break:break-all}
+.bet-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.03);font-family:var(--mono);font-size:12px}
+.side{font-weight:700;padding:2px 6px;border-radius:4px;font-size:10px;letter-spacing:0.5px}
+.side.yes{background:rgba(34,197,94,0.15);color:var(--green)}
+.side.no{background:rgba(239,68,68,0.15);color:var(--red)}
+.dots{display:flex;gap:4px;flex-wrap:wrap;padding:8px 0}
+.dot{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;font-family:var(--mono)}
+.dot.w{background:rgba(34,197,94,0.15);color:var(--green);border:1px solid rgba(34,197,94,0.3)}
+.dot.l{background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.3)}
+.breaker{background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:10px;padding:12px 16px;margin-bottom:16px;display:none;align-items:center;gap:12px;font-family:var(--mono);font-size:13px}
+.breaker.active{display:flex}
+.shield-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+@media(max-width:900px){.shield-grid{grid-template-columns:repeat(2,1fr)}}
+.shield{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;text-align:center}
+.shield .lbl{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);font-weight:600}
+.shield .val{font-family:var(--mono);font-size:20px;font-weight:700;margin-top:4px}
 </style>
 </head>
 <body>
 <div class="bg"></div>
 <div class="app">
-  <!-- HEADER -->
   <div class="header">
     <div class="logo">
-      <div class="logo-icon">₿</div>
-      <div><h1>YOLO ENGINE v2</h1><sub>BTC 15-MIN SCALPER</sub></div>
+      <div class="logo-icon">⚡</div>
+      <div><h1>YOLO ENGINE v3</h1><sub>CRYPTO MISPRICING SCALPER · BTC / ETH / SOL</sub></div>
     </div>
     <div class="controls">
-      <div id="modeBadge" class="mode-badge" style="background:rgba(168,85,247,0.15);border:1px solid rgba(168,85,247,0.3);color:var(--purple)">LEARNING</div>
+      <div id="modeBadge" class="badge" style="background:rgba(6,182,212,0.15);border:1px solid rgba(6,182,212,0.3);color:var(--cyan)">FADE MODE</div>
       <button class="btn go" onclick="doStart()">START</button>
       <button class="btn stop" onclick="doStop()">STOP</button>
       <button class="btn" onclick="doPause()">PAUSE</button>
     </div>
   </div>
 
-  <!-- BTC TICKER + TA INDICATORS -->
   <div class="ticker">
     <div class="btc" id="btcPrice">$—</div>
-    <div id="btcSignal" class="signal" style="background:rgba(255,255,255,0.06);color:var(--dim)">—</div>
-    <div class="meta">RSI: <span id="taRsi">—</span> · MACD: <span id="taMacd">—</span> · BB%: <span id="taBb">—</span></div>
-    <div class="meta">VWAP: <span id="taVwap">—</span> · Score: <span id="taScore" style="font-weight:700">—</span></div>
+    <div id="stratChip" class="chip" style="background:rgba(6,182,212,0.12);color:var(--cyan)">SCANNING</div>
+    <div class="meta">Strategy: <span style="color:var(--cyan);font-weight:600">Fade Mispricing</span></div>
     <div class="meta" style="margin-left:auto" id="btcSource">—</div>
   </div>
 
-  <!-- TA REASONS -->
-  <div id="taReasons" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;min-height:24px"></div>
+  <div class="breaker" id="breakerBanner">
+    <div style="font-size:20px">🧊</div>
+    <div><strong>CIRCUIT BREAKER ACTIVE</strong> — Paused after consecutive losses. Cooling down.</div>
+  </div>
 
-  <!-- MAIN GRID -->
+  <div class="shield-grid">
+    <div class="shield"><div class="lbl">Streak</div><div class="val" id="streakVal">—</div></div>
+    <div class="shield"><div class="lbl">Drawdown</div><div class="val" id="drawdownVal">0%</div></div>
+    <div class="shield"><div class="lbl">Win Rate</div><div class="val" id="wrVal">—</div></div>
+    <div class="shield"><div class="lbl">Bet Sizing</div><div class="val" id="sizingVal">½ Kelly</div></div>
+  </div>
+
   <div class="grid">
-    <!-- LEFT: Countdown + Bankroll -->
     <div>
-      <div class="card countdown">
-        <div class="card-title">Countdown</div>
-        <div class="time" id="countdown">48<span class="colon">:</span>00<span class="colon">:</span>00</div>
-      </div>
+      <div class="card countdown"><div class="card-title">Countdown</div><div class="time" id="countdown">48<span class="colon">:</span>00<span class="colon">:</span>00</div></div>
       <div class="card" style="margin-top:12px">
         <div class="card-title">Bankroll</div>
         <div class="big-num" id="bankroll">$100.00</div>
@@ -138,20 +110,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow-x:h
         <div class="sub-num" style="margin-top:6px">Peak: $<span id="peak">100.00</span> · Target: $<span id="targetVal">10,000</span></div>
       </div>
     </div>
-
-    <!-- CENTER: Active positions + bet chart -->
     <div>
-      <div class="card" style="min-height:200px">
-        <div class="card-title">Active Positions</div>
-        <div id="activePositions" style="font-family:var(--mono);font-size:12px;color:var(--dim)">No active bets</div>
-      </div>
-      <div class="card" style="margin-top:12px">
-        <div class="card-title">Win/Loss Pattern</div>
-        <div class="dots" id="wlDots"></div>
-      </div>
+      <div class="card" style="min-height:200px"><div class="card-title">Active Positions</div><div id="activePositions" style="font-family:var(--mono);font-size:12px;color:var(--dim)">No active bets</div></div>
+      <div class="card" style="margin-top:12px"><div class="card-title">Win / Loss Pattern</div><div class="dots" id="wlDots"></div></div>
     </div>
-
-    <!-- RIGHT: Stats -->
     <div>
       <div class="card">
         <div class="card-title">Performance</div>
@@ -166,45 +128,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow-x:h
     </div>
   </div>
 
-  <!-- CORRECTION ENGINE -->
-  <div class="corr">
-    <div class="corr-header">
-      <div style="display:flex;align-items:center;gap:10px">
-        <span style="font-size:18px">🧠</span>
-        <div><div style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--purple);letter-spacing:1px">CORRECTION ENGINE</div>
-        <div style="font-size:10px;color:var(--dim)">Self-correcting adaptive brain</div></div>
-      </div>
-      <div id="corrMode" class="mode-badge" style="background:rgba(168,85,247,0.15);border:1px solid rgba(168,85,247,0.3);color:var(--purple)">LEARNING</div>
-    </div>
-    <div class="corr-grid">
-      <div class="corr-cell"><div class="lbl">Edge ×</div><div class="v" id="corrEdge">1.00</div></div>
-      <div class="corr-cell"><div class="lbl">Size ×</div><div class="v" id="corrSize">1.00</div></div>
-      <div class="corr-cell"><div class="lbl">Streak</div><div class="v" id="corrStreak">—</div></div>
-      <div class="corr-cell"><div class="lbl">Engine WR</div><div class="v" id="corrWR">—</div></div>
-    </div>
-    <div class="dim-grid">
-      <div><div class="card-title">Direction Bias</div><div class="dim-row" id="corrDir"></div></div>
-      <div><div class="card-title">Time Windows</div><div class="dim-row" id="corrTime"></div></div>
-    </div>
-    <div style="margin-top:12px"><div class="card-title">Volatility Regime</div><div class="dim-row" id="corrVol"></div></div>
-  </div>
-
-  <!-- BOTTOM: LOG + RECENT BETS -->
   <div class="bottom-grid">
-    <div class="card" style="max-height:350px;overflow-y:auto">
-      <div class="card-title">Event Log</div>
-      <div id="eventLog"></div>
-    </div>
-    <div class="card" style="max-height:350px;overflow-y:auto">
-      <div class="card-title">Recent Bets</div>
-      <div id="recentBets"></div>
-    </div>
+    <div class="card" style="max-height:400px;overflow-y:auto"><div class="card-title">Event Log</div><div id="eventLog"></div></div>
+    <div class="card" style="max-height:400px;overflow-y:auto"><div class="card-title">Recent Bets</div><div id="recentBets"></div></div>
   </div>
 </div>
 
 <script>
 let ws, status = {};
-
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}`);
@@ -212,53 +143,53 @@ function connect() {
   ws.onclose = () => setTimeout(connect, 2000);
   ws.onerror = () => ws.close();
 }
-
 function update(s) {
   status = s;
-
-  // BTC + TA
   if (s.btc) {
     const p = s.btc.price;
     document.getElementById('btcPrice').textContent = p ? `$${p.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '$—';
-    document.getElementById('btcSource').textContent = (s.btc.source || '—') + (s.btc.candles ? ` (${s.btc.candles} candles)` : '');
-    const sig = s.btc.signals || s.btc.signal || {};
-    const dir = sig.direction || 'NEUTRAL';
-    const sigEl = document.getElementById('btcSignal');
-    sigEl.textContent = `${dir} (${sig.confidence || sig.strength || 0})`;
-    sigEl.style.background = dir === 'UP' || dir === 'BUY' ? 'rgba(34,197,94,0.15)' : dir === 'DOWN' || dir === 'SELL' ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.06)';
-    sigEl.style.color = dir === 'UP' || dir === 'BUY' ? 'var(--green)' : dir === 'DOWN' || dir === 'SELL' ? 'var(--red)' : 'var(--dim)';
-
-    // TA indicators
-    const ind = s.btc.indicators || {};
-    const rsi = ind.rsi14 || sig.rsi; if (rsi != null) { const re = document.getElementById('taRsi'); re.textContent = (+rsi).toFixed(1); re.style.color = rsi > 70 ? 'var(--red)' : rsi < 30 ? 'var(--green)' : 'var(--text)'; }
-    const mh = ind.macdHist || sig.macdHist; if (mh != null) { const me = document.getElementById('taMacd'); me.textContent = (+mh).toFixed(1); me.style.color = mh > 0 ? 'var(--green)' : 'var(--red)'; }
-    const bb = ind.bbPctB || sig.bbPctB; if (bb != null) { document.getElementById('taBb').textContent = (+bb*100).toFixed(0) + '%'; }
-    const vd = sig.vwapDelta; if (vd != null) { const ve = document.getElementById('taVwap'); ve.textContent = (vd > 0 ? '+' : '') + (+vd).toFixed(3) + '%'; ve.style.color = vd > 0 ? 'var(--green)' : 'var(--red)'; }
-    const sc = sig.score || sig.strength; if (sc != null) { const se = document.getElementById('taScore'); se.textContent = (sc > 0 ? '+' : '') + sc; se.style.color = sc > 15 ? 'var(--green)' : sc < -15 ? 'var(--red)' : 'var(--dim)'; }
-
-    // TA reasons
-    const reasons = sig.reasons || (s.btc.signal || {}).reasons || [];
-    document.getElementById('taReasons').innerHTML = reasons.map(r => `<span style="font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:4px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:var(--dim)">${r}</span>`).join('');
+    document.getElementById('btcSource').textContent = s.btc.source || '—';
   }
+  const chip = document.getElementById('stratChip');
+  const active = (s.active || []).length;
+  if (s.stats?.coolingDown) { chip.textContent = '🧊 COOLDOWN'; chip.style.background = 'rgba(239,68,68,0.12)'; chip.style.color = 'var(--red)'; }
+  else if (active > 0) { chip.textContent = `${active} ACTIVE`; chip.style.background = 'rgba(34,197,94,0.12)'; chip.style.color = 'var(--green)'; }
+  else { chip.textContent = 'SCANNING'; chip.style.background = 'rgba(6,182,212,0.12)'; chip.style.color = 'var(--cyan)'; }
 
-  // Countdown
+  const banner = document.getElementById('breakerBanner');
+  if (s.stats?.coolingDown) banner.classList.add('active'); else banner.classList.remove('active');
+
+  const streak = s.stats?.streak || 0;
+  const streakEl = document.getElementById('streakVal');
+  if (streak > 0) { streakEl.textContent = `W${streak}`; streakEl.style.color = 'var(--green)'; }
+  else if (streak < 0) { streakEl.textContent = `L${Math.abs(streak)}`; streakEl.style.color = 'var(--red)'; }
+  else { streakEl.textContent = '—'; streakEl.style.color = 'var(--dim)'; }
+
+  const dd = s.stats?.drawdown || 0;
+  const ddEl = document.getElementById('drawdownVal');
+  ddEl.textContent = dd.toFixed(1) + '%'; ddEl.style.color = dd > 30 ? 'var(--red)' : dd > 15 ? 'var(--accent)' : 'var(--green)';
+
+  const wr = s.stats?.wr || 0; const wrEl = document.getElementById('wrVal');
+  wrEl.textContent = (s.stats?.bets || 0) > 0 ? wr + '%' : '—';
+  wrEl.style.color = wr >= 55 ? 'var(--green)' : wr >= 45 ? 'var(--accent)' : wr > 0 ? 'var(--red)' : 'var(--dim)';
+
+  const sizEl = document.getElementById('sizingVal');
+  if (dd > 50) { sizEl.textContent = '¼ Kelly'; sizEl.style.color = 'var(--red)'; }
+  else if (dd > 30) { sizEl.textContent = '½ Kelly ↓'; sizEl.style.color = 'var(--accent)'; }
+  else { sizEl.textContent = '½ Kelly'; sizEl.style.color = 'var(--green)'; }
+
   if (s.countdown) {
     const {h,m:mn,s:sc} = s.countdown;
     document.getElementById('countdown').innerHTML = `${String(h).padStart(2,'0')}<span class="colon">:</span>${String(mn).padStart(2,'0')}<span class="colon">:</span>${String(sc).padStart(2,'0')}`;
   }
-
-  // Bankroll
   document.getElementById('bankroll').textContent = `$${(s.bankroll||0).toFixed(2)}`;
-  const pnl = s.pnl || 0;
-  const pnlEl = document.getElementById('pnl');
-  pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
-  pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnl = s.pnl || 0; const pnlEl = document.getElementById('pnl');
+  pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`; pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
   document.getElementById('pnlPct').textContent = (s.pnlPct||0).toFixed(1);
   document.getElementById('progressBar').style.width = Math.max(0, Math.min(100, s.progress||0)) + '%';
   document.getElementById('peak').textContent = (s.peak||100).toFixed(2);
   document.getElementById('targetVal').textContent = (s.target||10000).toLocaleString();
 
-  // Stats
   if (s.stats) {
     document.getElementById('totalBets').textContent = s.stats.bets || 0;
     document.getElementById('winRate').textContent = (s.stats.wr||0) + '%';
@@ -267,112 +198,51 @@ function update(s) {
     document.getElementById('wagered').textContent = `$${(s.stats.wagered||0).toFixed(2)}`;
   }
 
-  // Active positions
   const ap = document.getElementById('activePositions');
   if (s.active && s.active.length > 0) {
-    ap.innerHTML = s.active.map(o => `<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
-      <span><span style="font-weight:700;color:${o.side==='yes'?'var(--green)':'var(--red)'}">${(o.side||'').toUpperCase()}</span> ${o.ticker}</span>
-      <span>${o.price}¢ ×${o.contracts} · ${o.dir} · ${o.mins}min</span>
-    </div>`).join('');
-  } else { ap.innerHTML = '<div style="color:var(--dim);padding:20px 0;text-align:center">No active bets</div>'; }
+    ap.innerHTML = s.active.map(o => {
+      const asset = (o.ticker||'').includes('ETH') ? '⟠' : (o.ticker||'').includes('SOL') ? '◎' : '₿';
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span>${asset} <span style="font-weight:700;color:${o.side==='yes'?'var(--green)':'var(--red)'}">${(o.side||'').toUpperCase()}</span> ${o.ticker}</span>
+        <span style="color:var(--dim)">${o.price}¢ ×${o.contracts} · ${o.mins}min</span></div>`;
+    }).join('');
+  } else ap.innerHTML = '<div style="color:var(--dim);padding:20px 0;text-align:center">No active bets</div>';
 
-  // Correction
-  if (s.correction) {
-    const c = s.correction;
-    document.getElementById('corrMode').textContent = c.mode || 'LEARNING';
-    const modeColors = { LEARNING: 'var(--purple)', DEFENSIVE: 'var(--red)', NORMAL: 'var(--green)', AGGRESSIVE: 'var(--blue)' };
-    document.getElementById('corrMode').style.color = modeColors[c.mode] || 'var(--purple)';
-    document.getElementById('modeBadge').textContent = c.mode || 'LEARNING';
-    document.getElementById('modeBadge').style.color = modeColors[c.mode] || 'var(--purple)';
-
-    const em = c.edgeMult || 1; document.getElementById('corrEdge').textContent = em.toFixed(2);
-    document.getElementById('corrEdge').style.color = em > 1.1 ? 'var(--red)' : em < 0.9 ? 'var(--green)' : 'var(--text)';
-    const sm = c.sizeMult || 1; document.getElementById('corrSize').textContent = sm.toFixed(2);
-    document.getElementById('corrSize').style.color = sm < 0.7 ? 'var(--red)' : sm > 1.1 ? 'var(--green)' : 'var(--text)';
-    document.getElementById('corrStreak').textContent = c.streak?.current || '—';
-    document.getElementById('corrWR').textContent = c.overall ? c.overall.wr + '%' : '—';
-
-    // Direction tags
-    if (c.directions) {
-      document.getElementById('corrDir').innerHTML = Object.entries(c.directions).map(([k,v]) => {
-        const wr = v.winRate >= 0 ? Math.round(v.winRate)+'%' : '—';
-        const col = v.w > 1.2 ? 'var(--green)' : v.w < 0.7 ? 'var(--red)' : 'var(--dim)';
-        return `<div class="dim-tag"><span class="nm" style="color:${col}">${k}</span><span class="wr">WR:${wr} n=${v.n} ×${(v.w||1).toFixed(2)}</span></div>`;
-      }).join('');
-    }
-    // Time tags
-    if (c.time) {
-      const icons = {morning:'☀️',midday:'🌤️',afternoon:'🌅',evening:'🌙'};
-      document.getElementById('corrTime').innerHTML = Object.entries(c.time).map(([k,v]) => {
-        const wr = v.winRate >= 0 ? Math.round(v.winRate)+'%' : '—';
-        return `<div class="dim-tag"><span class="nm">${icons[k]||''} ${k}</span><span class="wr">WR:${wr} n=${v.n}</span></div>`;
-      }).join('');
-    }
-    // Vol tags
-    if (c.vol) {
-      document.getElementById('corrVol').innerHTML = Object.entries(c.vol).map(([k,v]) => {
-        const wr = v.winRate >= 0 ? Math.round(v.winRate)+'%' : '—';
-        return `<div class="dim-tag"><span class="nm">${k}</span><span class="wr">WR:${wr} n=${v.n} ×${(v.w||1).toFixed(2)}</span></div>`;
-      }).join('');
-    }
-
-    // Win/loss dots
-    if (c.recent) {
-      document.getElementById('wlDots').innerHTML = c.recent.map(r => `<div class="dot ${r.won?'w':'l'}" title="${r.ticker} ${r.won?'+':'-'}$${Math.abs(r.pnl).toFixed(2)}">${r.won?'✓':'✗'}</div>`).join('');
-    }
-  }
-
-  // Event log
-  if (s.log) {
-    document.getElementById('eventLog').innerHTML = s.log.slice(0,25).map(l => `<div class="log-entry"><span class="ts">${new Date(l.t).toLocaleTimeString()}</span><span class="ev">${l.ev}</span><span class="det">${l.d}</span></div>`).join('');
-  }
-
-  // Recent bets
   if (s.recentBets) {
-    document.getElementById('recentBets').innerHTML = s.recentBets.slice(0,15).map(b => `<div class="bet-row">
-      <span><span class="side ${b.side}">${(b.side||'').toUpperCase()}</span> ${(b.ticker||'').slice(0,20)}</span>
-      <span style="color:${b.won?'var(--green)':'var(--red)'};font-weight:700">${b.won?'+':'-'}$${Math.abs(b.pnl||0).toFixed(2)}</span>
-    </div>`).join('') || '<div style="color:var(--dim);text-align:center;padding:20px">No bets yet</div>';
+    document.getElementById('wlDots').innerHTML = s.recentBets.slice().reverse().map(b =>
+      `<div class="dot ${b.won?'w':'l'}" title="${b.ticker} ${b.won?'+':'-'}$${Math.abs(b.pnl||0).toFixed(2)}">${b.won ? '✓' : '✗'}</div>`
+    ).join('');
+  }
+  if (s.log) {
+    document.getElementById('eventLog').innerHTML = s.log.slice(0,30).map(l =>
+      `<div class="log-entry"><span class="ts">${new Date(l.t).toLocaleTimeString()}</span><span class="ev">${l.ev}</span><span class="det">${l.d}</span></div>`
+    ).join('');
+  }
+  if (s.recentBets) {
+    document.getElementById('recentBets').innerHTML = s.recentBets.slice(0,15).map(b => {
+      const asset = (b.ticker||'').includes('ETH') ? '⟠' : (b.ticker||'').includes('SOL') ? '◎' : '₿';
+      return `<div class="bet-row"><span>${asset} <span class="side ${b.side}">${(b.side||'').toUpperCase()}</span> ${(b.ticker||'').slice(0,22)}</span>
+        <span style="color:${b.won?'var(--green)':'var(--red)'};font-weight:700">${b.won?'+':'-'}$${Math.abs(b.pnl||0).toFixed(2)}</span></div>`;
+    }).join('') || '<div style="color:var(--dim);text-align:center;padding:20px">No bets yet</div>';
   }
 }
-
-// Local countdown tick
 setInterval(() => {
   if (!status.countdown) return;
-  let t = status.countdown.total;
-  if (t <= 0) return;
-  t = Math.max(0, t - 1);
-  status.countdown.total = t;
-  status.countdown.h = Math.floor(t/3600);
-  status.countdown.m = Math.floor((t%3600)/60);
-  status.countdown.s = Math.floor(t%60);
+  let t = status.countdown.total; if (t <= 0) return; t = Math.max(0, t - 1);
+  status.countdown.total = t; status.countdown.h = Math.floor(t/3600);
+  status.countdown.m = Math.floor((t%3600)/60); status.countdown.s = Math.floor(t%60);
   const {h,m,s} = status.countdown;
   document.getElementById('countdown').innerHTML = `${String(h).padStart(2,'0')}<span class="colon">:</span>${String(m).padStart(2,'0')}<span class="colon">:</span>${String(s).padStart(2,'0')}`;
 }, 1000);
-
 function doStart() {
   document.querySelector('.btn.go').textContent = 'STARTING...';
-  fetch('/api/start', {method:'POST'})
-    .then(r => r.json())
-    .then(d => {
-      if (d.error) { alert('Start failed: ' + d.error); document.querySelector('.btn.go').textContent = 'START'; }
-      else { document.querySelector('.btn.go').textContent = '● RUNNING'; fetch('/api/status').then(r=>r.json()).then(update); }
-    })
-    .catch(e => { alert('Start failed: ' + e.message); document.querySelector('.btn.go').textContent = 'START'; });
+  fetch('/api/start', {method:'POST'}).then(r => r.json()).then(d => {
+    if (d.error) { alert('Start failed: ' + d.error); document.querySelector('.btn.go').textContent = 'START'; }
+    else document.querySelector('.btn.go').textContent = '● RUNNING';
+  }).catch(e => { alert('Start failed: ' + e.message); document.querySelector('.btn.go').textContent = 'START'; });
 }
-function doStop() {
-  fetch('/api/stop', {method:'POST'}).then(r=>r.json()).then(d => {
-    document.querySelector('.btn.go').textContent = 'START';
-    if (d.error) alert('Stop failed: ' + d.error);
-  }).catch(e => alert('Stop failed: ' + e.message));
-}
-function doPause() {
-  fetch('/api/pause', {method:'POST'}).then(r=>r.json()).then(d => {
-    alert(d.paused ? 'Bot PAUSED' : 'Bot RESUMED');
-  }).catch(e => alert('Pause failed: ' + e.message));
-}
-
-// Init
+function doStop() { fetch('/api/stop',{method:'POST'}).then(r=>r.json()).then(()=>{document.querySelector('.btn.go').textContent='START'}).catch(e=>alert(e.message)); }
+function doPause() { fetch('/api/pause',{method:'POST'}).then(r=>r.json()).then(d=>alert(d.paused?'Bot PAUSED':'Bot RESUMED')).catch(e=>alert(e.message)); }
 connect();
 fetch('/api/status').then(r=>r.json()).then(update).catch(()=>{});
 </script>
