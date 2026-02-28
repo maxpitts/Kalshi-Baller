@@ -143,6 +143,16 @@ class BTCScalper extends EventEmitter {
 
     const now = Date.now();
 
+    // ── DIAGNOSTIC: log what we actually see every 3rd cycle ──
+    if (this._cycleCount % 3 === 0 && markets.length > 0) {
+      const samples = markets.slice(0, 3).map(m => {
+        const exp = new Date(m.close_time || m.expiration_time || m.expected_expiration_time);
+        const mins = ((exp.getTime() - now) / 60000).toFixed(1);
+        return `${m.ticker} Y:${m.yes_ask||'?'}¢ N:${m.no_ask||'?'}¢ ${mins}min`;
+      });
+      this._log('🔎 DIAG', samples.join(' | '));
+    }
+
     // ── MAIN STRATEGY: uncertain middle, 2-25 min out ──
     const candidates = markets.filter(m => {
       if (this.activeTickers.has(m.ticker)) return false;
@@ -161,10 +171,16 @@ class BTCScalper extends EventEmitter {
 
     // Run micro bets first (they're time-sensitive)
     if (microCandidates.length > 0) {
+      this._log('🔸 Micro scan', `${microCandidates.length} markets 1-4min out`);
       for (const m of microCandidates.slice(0, 4)) {
         try {
           const micro = await this._analyzeMicro(m, sig);
           if (micro) await this._placeMicro(micro);
+          else {
+            // Log why micro skipped
+            const ya = m.yes_ask || '?', na = m.no_ask || '?';
+            this._log('🔸 Micro skip', `${m.ticker} Y:${ya}¢ N:${na}¢ (need 70-92¢ favorite)`);
+          }
           await new Promise(r => setTimeout(r, 150));
         } catch(e) {}
       }
@@ -365,52 +381,57 @@ class BTCScalper extends EventEmitter {
 
     const exp = new Date(market.close_time || market.expiration_time || market.expected_expiration_time);
     const minsLeft = (exp - Date.now()) / 60000;
-    if (minsLeft < 0.5 || minsLeft > 4) return null; // too close or too far
+    if (minsLeft < 0.5 || minsLeft > 4) return null;
+
+    // Log what we see (every micro candidate)
+    this._log('🔸 Micro prices', `${market.ticker} Y:${yesAsk}¢ N:${noAsk}¢ ${minsLeft.toFixed(1)}min`);
 
     // ── IDENTIFY THE FAVORITE ──
-    // We want the side priced 70-92¢ (strong favorite but not locked in)
-    // Below 70¢ = not enough conviction
-    // Above 92¢ = too expensive, risk/reward terrible
+    // Buy the side priced 70-92¢ (strong favorite)
+    // The market itself IS the signal — if YES is 80¢ with 2min left,
+    // that means BTC is clearly above the strike. We don't need separate
+    // momentum data to confirm what the entire market is already showing.
 
     let side = null, price = null, payout = null, reason = '';
 
-    // Momentum must CONFIRM the favorite
+    // Optional momentum boost (but NOT required)
     const mom = sig.momentum5m || 0;
-    const momUp = mom > 0.01;
-    const momDown = mom < -0.01;
+    let momBoost = false;
 
     if (yesAsk >= 70 && yesAsk <= 92) {
-      // YES is favorite — only buy if BTC momentum is UP
-      if (!momUp) return null; // no momentum confirmation
       side = 'yes'; price = yesAsk;
-      payout = 100 - yesAsk; // what we win per contract
-      reason = `MICRO YES@${yesAsk}¢ (payout:${payout}¢) mom↑`;
+      payout = 100 - yesAsk;
+      reason = `MICRO YES@${yesAsk}¢ ${minsLeft.toFixed(1)}min`;
+      if (mom > 0.01) { momBoost = true; reason += ' +mom↑'; }
+      // BLOCK if momentum strongly opposes (BTC dumping hard while YES is favorite)
+      if (mom < -0.05) return null;
     } else if (noAsk >= 70 && noAsk <= 92) {
-      // NO is favorite — only buy if BTC momentum is DOWN
-      if (!momDown) return null;
       side = 'no'; price = noAsk;
       payout = 100 - noAsk;
-      reason = `MICRO NO@${noAsk}¢ (payout:${payout}¢) mom↓`;
+      reason = `MICRO NO@${noAsk}¢ ${minsLeft.toFixed(1)}min`;
+      if (mom < -0.01) { momBoost = true; reason += ' +mom↓'; }
+      if (mom > 0.05) return null;
     }
 
     if (!side) return null;
 
-    // ── PAYOFF CHECK ──
-    // Need payout to justify the risk after fees
+    // Fee + payout check
     const fee = 0.07 * (price / 100) * (1 - price / 100);
     const feeCents = fee * 100;
     const netPayout = payout - feeCents;
-
-    // Need at least 5¢ net payout per contract to be worth it
     if (netPayout < 5) return null;
 
-    // Win probability estimate: use market price as base, boost slightly for momentum confirmation
+    // Win probability: use market price as base
+    // Market says 80% → we trust that. Add small boost for momentum confirm.
     const impliedProb = price / 100;
-    const estWinRate = Math.min(0.95, impliedProb + 0.03); // 3% boost for momentum confirm
+    const estWinRate = Math.min(0.95, impliedProb + (momBoost ? 0.03 : 0.01));
 
-    // Expected value check: (winRate × payout) - (lossRate × cost) > 0
+    // EV check
     const ev = (estWinRate * netPayout) - ((1 - estWinRate) * price);
     if (ev <= 0) return null;
+
+    // Tighter near expiry: if <1.5 min left, need 75+¢ (more certain)
+    if (minsLeft < 1.5 && price < 75) return null;
 
     return {
       ticker: market.ticker, side, price, payout, netPayout: +netPayout.toFixed(1),
