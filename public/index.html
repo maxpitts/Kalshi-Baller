@@ -83,7 +83,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow-x:h
   <div class="ticker">
     <div class="btc" id="btcPrice">$—</div>
     <div id="stratChip" class="chip" style="background:rgba(6,182,212,0.12);color:var(--cyan)">SCANNING</div>
-    <div class="meta">Strategy: <span style="color:var(--cyan);font-weight:600">Fade Mispricing</span></div>
+    <div class="meta">Strategy: <span id="strategyLabel" style="color:var(--cyan);font-weight:600">Loading...</span></div>
     <div class="meta" style="margin-left:auto" id="btcSource">—</div>
   </div>
 
@@ -96,7 +96,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow-x:h
     <div class="shield"><div class="lbl">Streak</div><div class="val" id="streakVal">—</div></div>
     <div class="shield"><div class="lbl">Drawdown</div><div class="val" id="drawdownVal">0%</div></div>
     <div class="shield"><div class="lbl">Win Rate</div><div class="val" id="wrVal">—</div></div>
-    <div class="shield"><div class="lbl">Bet Sizing</div><div class="val" id="sizingVal">½ Kelly</div></div>
+    <div class="shield"><div class="lbl">Observations</div><div class="val" id="sizingVal">0</div></div>
   </div>
 
   <div class="grid">
@@ -148,11 +148,12 @@ function update(s) {
   if (s.btc) {
     const p = s.btc.price;
     document.getElementById('btcPrice').textContent = p ? `$${p.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '$—';
-    document.getElementById('btcSource').textContent = s.btc.source || '—';
+    document.getElementById('btcSource').textContent = s.btc.source || s.source || '—';
   }
+  if (s.strategy) document.getElementById('strategyLabel').textContent = s.strategy;
   const chip = document.getElementById('stratChip');
   const active = (s.active || []).length;
-  if (s.stats?.coolingDown) { chip.textContent = '🧊 COOLDOWN'; chip.style.background = 'rgba(239,68,68,0.12)'; chip.style.color = 'var(--red)'; }
+  if (s.phase === 'LEARNING') { chip.textContent = '📚 LEARNING'; chip.style.background = 'rgba(251,191,36,0.12)'; chip.style.color = '#fbbf24'; }
   else if (active > 0) { chip.textContent = `${active} ACTIVE`; chip.style.background = 'rgba(34,197,94,0.12)'; chip.style.color = 'var(--green)'; }
   else { chip.textContent = 'SCANNING'; chip.style.background = 'rgba(6,182,212,0.12)'; chip.style.color = 'var(--cyan)'; }
 
@@ -174,9 +175,8 @@ function update(s) {
   wrEl.style.color = wr >= 55 ? 'var(--green)' : wr >= 45 ? 'var(--accent)' : wr > 0 ? 'var(--red)' : 'var(--dim)';
 
   const sizEl = document.getElementById('sizingVal');
-  if (dd > 50) { sizEl.textContent = '¼ Kelly'; sizEl.style.color = 'var(--red)'; }
-  else if (dd > 30) { sizEl.textContent = '½ Kelly ↓'; sizEl.style.color = 'var(--accent)'; }
-  else { sizEl.textContent = '½ Kelly'; sizEl.style.color = 'var(--green)'; }
+  if (s.stats?.observations != null) { sizEl.textContent = `${s.stats.observations} obs`; sizEl.style.color = s.stats.observations >= 10 ? 'var(--green)' : 'var(--accent)'; }
+  else { sizEl.textContent = '—'; }
 
   if (s.countdown) {
     const {h,m:mn,s:sc} = s.countdown;
